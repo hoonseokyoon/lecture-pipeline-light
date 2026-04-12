@@ -1,0 +1,2 @@
+notebooklm-py[browser]>=0.3.4
+pypdfium2>=4.30.0

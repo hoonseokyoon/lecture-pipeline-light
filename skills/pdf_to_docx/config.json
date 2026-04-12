@@ -1,0 +1,9 @@
+{
+    "model": "gpt-5.4",
+    "reasoning_effort": "low",
+    "timeout": 600,
+    "output_dir": "pdf_converted",
+    "output_rename": {
+        "output.docx": "{stem}-output.docx"
+    }
+}

@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+.transcribe_log
+*.m4a
+*.mp3
+*.mp4
+*.wav
+*.ogg
+*.flac
+*.aac
+*_corrected.txt
+.env
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Claude session
+.claude/
+
+# Legacy standalone configs
+correct_config.json
+correct_prompt.txt
+
+# One-off scripts
+scripts/rerun_*.py

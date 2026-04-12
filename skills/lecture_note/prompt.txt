@@ -1,0 +1,13 @@
+lecture_note는 composite skill입니다 (`skill.py`의 `run()` 함수 사용).
+
+Codex가 직접 이 prompt.txt를 읽지 않으며, 내부적으로 여러 하위 skill을
+orchestrate합니다:
+- slides_textify: PDF → 페이지별 anchor 텍스트
+- (내부) align: 페이지별로 녹취 라인 구간 배정 (배치 처리)
+- (내부) reconcile: orphan 정리
+- glossary: 용어집 생성
+- (내부) compose: 페이지별 마크다운 섹션 작성
+- (내부) merge: 최종 note.md
+
+입력: PDF 1개 이상 + transcript(.txt) 1개 이상
+출력: note.md (워크스페이스의 output_dir에 저장)

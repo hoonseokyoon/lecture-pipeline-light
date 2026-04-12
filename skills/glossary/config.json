@@ -1,0 +1,7 @@
+{
+    "model": "gpt-5.4",
+    "reasoning_effort": "xhigh",
+    "timeout": 2400,
+    "output_dir": "glossary",
+    "batch": true
+}

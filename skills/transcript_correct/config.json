@@ -1,0 +1,13 @@
+{
+  "model": "gpt-5.4",
+  "reasoning_effort": "xhigh",
+  "timeout": 2400,
+  "output_dir": "corrected",
+  "output_rename": {
+    "transcript.txt": "{stem}-transcript-corrected.txt"
+  },
+  "retry_if_shrunk": [
+    {"max_ratio": 0.333, "extra_attempts": 2},
+    {"max_ratio": 0.5, "extra_attempts": 1}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+    "model": "gpt-5.4",
+    "reasoning_effort": "medium",
+    "timeout": 1200,
+    "output_dir": "_textify"
+}

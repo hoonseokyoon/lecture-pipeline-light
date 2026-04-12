@@ -1,0 +1,3 @@
+python-docx
+pdf2image
+pypdf

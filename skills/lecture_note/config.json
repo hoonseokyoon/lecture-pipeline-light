@@ -1,0 +1,18 @@
+{
+    "model": "gpt-5.4",
+    "reasoning_effort": "xhigh",
+    "timeout": 2400,
+    "output_dir": "lecture_note",
+    "batch": true,
+    "ask_file_order": true,
+    "batch_size": 12,
+    "overlap": 3,
+    "compose_parallel": 8,
+    "compose_reasoning_effort": "high",
+    "align_reasoning_effort": "high",
+    "output_rename": {
+        "note.md": "{stem}-note.md",
+        "note.json": "{stem}-note.json",
+        "note.html": "{stem}-note.html"
+    }
+}

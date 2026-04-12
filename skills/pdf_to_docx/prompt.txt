@@ -1,0 +1,9 @@
+`inputs/input.pdf`의 PDF 페이지를 `scripts/template.docx` 양식에 이미지로 삽입하여
+`outputs/output.docx`로 저장하세요.
+
+venv는 이미 PATH에 올라간 상태이므로 `python`을 그대로 호출하면 됩니다.
+아래 명령을 그대로 실행:
+
+    python scripts/pdf_to_docx.py inputs/input.pdf scripts/template.docx -o outputs/output.docx
+
+명령이 성공했는지 `outputs/output.docx` 파일이 생성되었는지 확인 후 종료.
