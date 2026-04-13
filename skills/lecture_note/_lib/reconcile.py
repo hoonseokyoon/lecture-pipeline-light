@@ -333,7 +333,8 @@ def _call_llm_classify(
     auto_summary: dict,
     model: str,
     reasoning_effort: str,
-    timeout: int,
+    service_tier: str = "default",
+    timeout: int = 600,
     log_callback: Callable[[str], None] | None = None,
 ) -> list[dict]:
     prompt = _build_reconcile_prompt(
@@ -492,6 +493,7 @@ def reconcile_orphans(
             },
             model=model,
             reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
             timeout=timeout,
             log_callback=log_callback,
         )
