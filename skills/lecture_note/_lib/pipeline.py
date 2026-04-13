@@ -139,6 +139,7 @@ def run_pipeline(
     model = cfg.get("model", "gpt-5.4")
     align_effort = cfg.get("align_reasoning_effort", cfg.get("reasoning_effort", "high"))
     compose_effort = cfg.get("compose_reasoning_effort", cfg.get("reasoning_effort", "high"))
+    service_tier = cfg.get("service_tier", "default")
     timeout = int(cfg.get("timeout", 2400))
     batch_size = int(cfg.get("batch_size", 12))
     overlap = int(cfg.get("overlap", 3))
@@ -235,6 +236,7 @@ def run_pipeline(
             numbered_txts=numbered,
             model=model,
             reasoning_effort=align_effort,
+            service_tier=service_tier,
             timeout=timeout,
             log_callback=log_callback,
         )
@@ -257,6 +259,7 @@ def run_pipeline(
             overlap=overlap,
             model=model,
             reasoning_effort=align_effort,
+            service_tier=service_tier,
             timeout=timeout,
             log_callback=log_callback,
         )
@@ -277,6 +280,7 @@ def run_pipeline(
             numbered_txts=numbered,
             model=model,
             reasoning_effort=align_effort,
+            service_tier=service_tier,
             timeout=timeout,
             log_callback=log_callback,
         )
@@ -299,6 +303,7 @@ def run_pipeline(
             slides_data=slides_data,
             model=model,
             reasoning_effort=align_effort,
+            service_tier=service_tier,
             timeout=timeout,
             log_callback=log_callback,
         )
@@ -336,6 +341,7 @@ def run_pipeline(
         pages_dir=cache.subdir("step5_pages"),
         model=model,
         reasoning_effort=compose_effort,
+        service_tier=service_tier,
         timeout=timeout,
         max_workers=compose_workers,
         log_callback=log_callback,
@@ -351,6 +357,7 @@ def run_pipeline(
         polish_cache_dir=cache.subdir("step5b_polished"),
         model=model,
         reasoning_effort=compose_effort,
+        service_tier=service_tier,
         timeout=timeout,
         log_callback=log_callback,
     )

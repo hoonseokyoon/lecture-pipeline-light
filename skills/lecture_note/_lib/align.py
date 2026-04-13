@@ -157,6 +157,7 @@ def align_pages_batched(
     overlap: int,
     model: str,
     reasoning_effort: str,
+    service_tier: str,
     timeout: int,
     log_callback: Callable[[str], None] | None,
 ) -> dict[int, list[dict]]:
@@ -210,6 +211,7 @@ def align_pages_batched(
                 output_schema=schema,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                service_tier=service_tier,
                 timeout=timeout,
             )
             raw = result.get("assignments.json", b"").decode("utf-8")

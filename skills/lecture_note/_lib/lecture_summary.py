@@ -126,7 +126,8 @@ def generate_lecture_summary(
     numbered_txts: dict[str, dict],
     model: str,
     reasoning_effort: str,
-    timeout: int,
+    service_tier: str = "default",
+    timeout: int = 600,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict:
     """Step 1b 실행. 실패 시 빈 요약 dict 반환 (pipeline 계속 진행).
@@ -145,6 +146,7 @@ def generate_lecture_summary(
             output_schema=LECTURE_SUMMARY_SCHEMA,
             model=model,
             reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
             timeout=timeout,
         )
     except CodexRunError as exc:

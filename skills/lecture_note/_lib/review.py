@@ -201,7 +201,8 @@ def review_alignment(
     numbered_txts: dict[str, dict],
     model: str,
     reasoning_effort: str,
-    timeout: int,
+    service_tier: str = "default",
+    timeout: int = 600,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict[int, list[dict]]:
     """LLM 리뷰 pass 1회. 위반 0개면 원본 그대로 반환."""
@@ -226,6 +227,7 @@ def review_alignment(
         output_schema=schema,
         model=model,
         reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
         timeout=timeout,
     )
     raw = result.get("assignments.json", b"").decode("utf-8")

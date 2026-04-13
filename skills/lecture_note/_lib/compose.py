@@ -340,7 +340,8 @@ def compose_one_page(
     level: str,
     model: str,
     reasoning_effort: str,
-    timeout: int,
+    service_tier: str = "default",
+    timeout: int = 600,
 ) -> str:
     """한 페이지에 대해 Codex 호출로 부분 결과를 받고 Python 조립.
 
@@ -366,6 +367,7 @@ def compose_one_page(
         output_schema=COMPOSE_SCHEMA,
         model=model,
         reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
         timeout=timeout,
     )
     raw = result.get("section.json", b"").decode("utf-8")
@@ -400,6 +402,7 @@ def compose_pages_parallel(
     pages_dir: Path,
     model: str,
     reasoning_effort: str,
+    service_tier: str,
     timeout: int,
     max_workers: int,
     log_callback: Callable[[str], None] | None,
@@ -455,6 +458,7 @@ def compose_pages_parallel(
                 level=importance_map.get(idx, "normal"),
                 model=model,
                 reasoning_effort=reasoning_effort,
+                service_tier=service_tier,
                 timeout=timeout,
             )
             return (idx, md, None)

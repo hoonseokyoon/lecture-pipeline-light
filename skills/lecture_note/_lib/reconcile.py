@@ -351,6 +351,7 @@ def _call_llm_classify(
         output_schema=schema,
         model=model,
         reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
         timeout=timeout,
     )
     raw = result.get("decisions.json", b"").decode("utf-8")
@@ -409,7 +410,8 @@ def reconcile_orphans(
     slides_data: dict,
     model: str,
     reasoning_effort: str,
-    timeout: int,
+    service_tier: str = "default",
+    timeout: int = 600,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict:
     """Orphan 구간을 Python + LLM 하이브리드로 분류·병합.

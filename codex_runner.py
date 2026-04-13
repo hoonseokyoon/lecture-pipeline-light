@@ -52,6 +52,7 @@ from typing import Callable
 
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_SERVICE_TIER = "default"
 DEFAULT_TIMEOUT = 600
 DEFAULT_WSL_DISTRO = "Ubuntu"
 DEFAULT_MAX_CONCURRENT = 4
@@ -325,6 +326,7 @@ def run_codex_task(
     output_schema: dict | None = None,
     model: str = DEFAULT_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    service_tier: str = DEFAULT_SERVICE_TIER,
     timeout: int = DEFAULT_TIMEOUT,
     wsl_distro: str = DEFAULT_WSL_DISTRO,
 ) -> dict[str, bytes]:
@@ -350,6 +352,7 @@ def run_codex_task(
             `outputs/` 파일로도 저장하도록 prompt에서 안내해야 한다.
         model: Codex 모델명. `-c model=...`로 전달.
         reasoning_effort: `low` | `medium` | `high` (xhigh 등 모델별 확장 포함).
+        service_tier: `"default"` | `"fast"`. fast는 1.5x 속도, 2x 크레딧.
         timeout: Codex 서브프로세스 타임아웃(초).
         wsl_distro: WSL 배포판 이름.
 
@@ -456,11 +459,17 @@ def run_codex_task(
         last_msg_file = "_last_message.txt"
 
         # Codex --full-auto는 작업 디렉토리가 git repo일 것을 요구한다.
+        tier_flag = (
+            f'-c service_tier="{service_tier}" '
+            if service_tier and service_tier != "default"
+            else ""
+        )
         codex_cmd = (
             f'cd "{wsl_dir}" && {path_prefix}git init -q && '
             f'codex exec '
             f'-c model="{model}" '
             f'-c model_reasoning_effort="{reasoning_effort}" '
+            f'{tier_flag}'
             f'--full-auto '
             f'-o {last_msg_file} '
             f'{schema_flag}'
@@ -778,6 +787,7 @@ def run_skill(
     *,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    service_tier: str | None = None,
     timeout: int | None = None,
     wsl_distro: str = DEFAULT_WSL_DISTRO,
     log_callback: Callable[[str], None] | None = None,
@@ -790,7 +800,8 @@ def run_skill(
         skill_dir: skill 폴더 경로 (예: `skills/transcript_correct`).
         inputs: 처리할 입력 파일 경로 리스트. `skill.normalize`가 workdir
             이름으로 재매핑한다.
-        model / reasoning_effort / timeout: 명시하면 config.json 값을 덮어쓴다.
+        model / reasoning_effort / service_tier / timeout: 명시하면
+            config.json 값을 덮어쓴다.
         wsl_distro: WSL 배포판 이름.
         log_callback: 진행 상황을 문자열로 받는 콜백 (옵션). 스레드 안전해야
             함 — 콜백은 워커 스레드에서 호출될 수 있음. 예외는 내부적으로
@@ -837,6 +848,10 @@ def run_skill(
         reasoning_effort if reasoning_effort is not None
         else cfg.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
     )
+    final_tier = (
+        service_tier if service_tier is not None
+        else cfg.get("service_tier", DEFAULT_SERVICE_TIER)
+    )
     final_timeout = (
         timeout if timeout is not None
         else cfg.get("timeout", DEFAULT_TIMEOUT)
@@ -861,6 +876,7 @@ def run_skill(
             expected_outputs=skill.expected_outputs,
             model=final_model,
             reasoning_effort=final_effort,
+            service_tier=final_tier,
             timeout=final_timeout,
             wsl_distro=wsl_distro,
         )

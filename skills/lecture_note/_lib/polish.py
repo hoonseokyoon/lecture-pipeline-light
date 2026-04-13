@@ -177,7 +177,8 @@ def polish_pages(
     polish_cache_dir: Path,
     model: str,
     reasoning_effort: str,
-    timeout: int,
+    service_tier: str = "default",
+    timeout: int = 600,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict[int, str]:
     """전체 페이지를 단일 Codex 호출로 polish.
@@ -245,6 +246,7 @@ def polish_pages(
             expected_outputs=expected_outputs,
             model=model,
             reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
             timeout=timeout,
         )
     except CodexRunError as exc:
