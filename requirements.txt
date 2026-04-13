@@ -1,2 +1,5 @@
 notebooklm-py[browser]>=0.3.4
 pypdfium2>=4.30.0
+PyMuPDF>=1.25.0
+google-genai>=1.0.0
+python-dotenv>=1.0.0

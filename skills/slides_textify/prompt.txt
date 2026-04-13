@@ -7,6 +7,13 @@
 `python scripts/extract_pdf.py inputs/slides.pdf -o _raw` 를 실행하면
 `_raw/page_001.txt`, `_raw/page_002.txt`, ... 가 생성됨.
 
+**enriched 파일 우선 사용**: `inputs/_enriched/page_NNN.txt` 파일이 존재하면,
+해당 페이지의 `_raw/page_NNN.txt`를 `inputs/_enriched/page_NNN.txt`의 내용으로
+교체하세요. enriched 파일은 이미지 중심 슬라이드에 대해 외부 Vision 모델이
+내용을 텍스트로 변환한 결과이며, pdfplumber가 추출하지 못한 정보를 포함합니다.
+구체적으로: `_raw/` 생성 후, `inputs/_enriched/` 안의 각 파일을 같은 이름의
+`_raw/` 파일에 덮어쓰기 하면 됩니다.
+
 # 페이지별 분석
 
 각 `_raw/page_NN.txt`를 읽고 다음을 추출:

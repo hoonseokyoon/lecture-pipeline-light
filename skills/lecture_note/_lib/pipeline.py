@@ -24,9 +24,10 @@ from _lib.polish import polish_pages
 from _lib.reconcile import reconcile_orphans
 from _lib.review import review_alignment
 from _lib.slides_flatten import flatten_slides
+from _lib.vision_extract import enrich_pdf_pages
 
 
-CACHE_VERSION = "v4"
+CACHE_VERSION = "v5"
 
 
 def _invalidate_stale_cache(
@@ -39,7 +40,8 @@ def _invalidate_stale_cache(
     - v1 → v2: reconcile 포맷 변경
     - v2 → v3: compose 프롬프트 변경 + step1b/step5b 추가
     - v3 → v4: multi-PDF slides_data 포맷 변경 + compute_run_id 순서 민감화
-    - 누적 적용 (v1→v4 는 세 단계 모두 적용)
+    - v4 → v5: vision enrichment 추가 → step1 재계산
+    - 누적 적용 (v1→v5 는 모든 단계 적용)
     """
     removed: list[str] = []
     files_to_remove: set[str] = set()
@@ -80,6 +82,14 @@ def _invalidate_stale_cache(
             "step5_pages",
             "step5b_polished",
             "numbered",
+        })
+
+    if from_version in ("v1", "v2", "v3", "v4"):
+        # v5: vision enrichment → step1 재계산 필요
+        files_to_remove.add("step1_slides.json")
+        dirs_to_remove.update({
+            "step1_slides",
+            "step0v_enriched",
         })
 
     for name in sorted(files_to_remove):
@@ -144,6 +154,9 @@ def run_pipeline(
     batch_size = int(cfg.get("batch_size", 12))
     overlap = int(cfg.get("overlap", 3))
     compose_workers = int(cfg.get("compose_parallel", 8))
+    vision_threshold = int(cfg.get("vision_char_threshold", 40))
+    gemini_model = cfg.get("gemini_model", "gemma-4-31b-it")
+    gemini_rpm = int(cfg.get("gemini_rpm", 0))
 
     # Run id + checkpoint dir
     run_id = compute_run_id(input_paths)
@@ -190,6 +203,46 @@ def run_pipeline(
         )
         _emit(log_callback, f"[step0] 완료 — {len(numbered)}개 파일")
 
+    # ── Step 0.5: vision enrichment (이미지 중심 페이지 Gemini 보강) ──
+    def _run_vision_enrich(pdf_path: Path, idx: int) -> list[Path]:
+        """PDF의 이미지 중심 페이지를 Gemini로 보강. enriched txt 경로 리스트 반환."""
+        enriched_dir = cache.subdir("step0v_enriched") / f"{idx:02d}_{pdf_path.stem}"
+        meta_path = enriched_dir / "_meta.json"
+
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            _emit(
+                log_callback,
+                f"[step0.5] {pdf_path.name} vision 캐시 로드 "
+                f"({meta.get('enriched_count', 0)}페이지 보강됨)",
+            )
+        else:
+            _emit(
+                log_callback,
+                f"[step0.5] {pdf_path.name} vision 분석 중...",
+            )
+            meta = enrich_pdf_pages(
+                pdf_path=pdf_path,
+                output_dir=enriched_dir,
+                char_threshold=vision_threshold,
+                gemini_model=gemini_model,
+                gemini_rpm=gemini_rpm,
+                log_callback=log_callback,
+            )
+            meta_path.write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        # enriched된 페이지의 txt 파일 경로만 반환
+        enriched_files: list[Path] = []
+        for page_info in meta.get("pages", []):
+            if page_info.get("enriched"):
+                txt_path = enriched_dir / f"page_{page_info['page']:03d}.txt"
+                if txt_path.exists():
+                    enriched_files.append(txt_path)
+        return enriched_files
+
     # ── Step 1: slides_textify (PDF별 개별 실행 후 flatten) ──
     def _run_textify_all() -> dict:
         per_pdf_dir = cache.subdir("step1_slides")
@@ -203,14 +256,20 @@ def run_pipeline(
                     f"[step1] {pdf_path.name} checkpoint 로드",
                 )
             else:
+                # Step 0.5: vision enrichment
+                enriched_files = _run_vision_enrich(pdf_path, i)
+
                 _emit(
                     log_callback,
                     f"[step1] slides_textify 실행: {pdf_path.name} "
-                    f"({i + 1}/{len(pdfs)})",
+                    f"({i + 1}/{len(pdfs)})"
+                    f"{f' + enriched {len(enriched_files)}p' if enriched_files else ''}",
                 )
+                # PDF + enriched txt 파일들을 함께 전달
+                skill_inputs: list[Path] = [pdf_path] + enriched_files
                 out = run_skill(
                     str(skill_dir.parent / "slides_textify"),
-                    [pdf_path],
+                    skill_inputs,
                     log_callback=log_callback,
                 )
                 raw = json.loads(out.get("pages.json", b"").decode("utf-8"))

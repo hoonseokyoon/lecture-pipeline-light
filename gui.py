@@ -23,6 +23,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
 
+# .env 파일에서 환경변수 로드 (GEMINI_API_KEY 등)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    pass  # python-dotenv 미설치 시 무시 — 환경변수 직접 설정 필요
+
 
 IS_FROZEN = getattr(sys, "frozen", False)
 
