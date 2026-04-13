@@ -97,13 +97,24 @@ class App:
             self.log_max_lines = 0  # 0 = 무제한
         self._log_line_count = 0
 
+        try:
+            self.max_concurrent_tasks = int(
+                gui_cfg.get("max_concurrent_tasks", codex_runner.DEFAULT_MAX_CONCURRENT)
+            )
+        except (TypeError, ValueError):
+            self.max_concurrent_tasks = codex_runner.DEFAULT_MAX_CONCURRENT
+        if self.max_concurrent_tasks < 1:
+            self.max_concurrent_tasks = 1
+
         self.workspace: Path | None = None
         self.transcribe_busy = False
         self.msg_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
         # ── Skill 작업 큐 (Transcribe와 독립) ──
         self.skill_queue: list[dict] = []
-        self.current_task: dict | None = None
+        self.running_tasks: list[dict] = []
+        self._worker_sem = threading.Semaphore(self.max_concurrent_tasks)
+        self._write_lock = threading.Lock()
         self.queue_lock = threading.Lock()
         self.queue_event = threading.Event()
         self._task_id_counter = 0
@@ -112,7 +123,7 @@ class App:
         self._build_ui()
         self._poll_queue()
 
-        # 큐 워커 스레드 시작
+        # 큐 디스패처 스레드 시작
         self.worker_thread = threading.Thread(
             target=self._queue_worker, daemon=True,
         )
@@ -424,31 +435,51 @@ class App:
         self.msg_queue.put(("queue_update", None))
 
     def _queue_worker(self) -> None:
-        """큐의 task를 순차 실행하는 daemon 스레드."""
+        """큐의 task를 병렬 디스패치하는 daemon 스레드.
+
+        _worker_sem이 허용하는 만큼 동시에 실행하고,
+        Codex 레벨 동시성은 codex_runner._CODEX_SEMAPHORE가 제어."""
         while not self.shutting_down:
             self.queue_event.wait(timeout=0.5)
             if self.shutting_down:
                 return
-            task = None
+            # 세마포어 여유분만큼 큐에서 꺼내 실행
+            while not self.shutting_down:
+                if not self._worker_sem.acquire(timeout=0):
+                    break  # 실행 슬롯 없음
+                task = None
+                with self.queue_lock:
+                    if self.skill_queue:
+                        task = self.skill_queue.pop(0)
+                        self.running_tasks.append(task)
+                    else:
+                        self.queue_event.clear()
+                if task is None:
+                    self._worker_sem.release()
+                    break
+                self.msg_queue.put(("queue_update", None))
+                threading.Thread(
+                    target=self._task_executor, args=(task,), daemon=True,
+                ).start()
+
+    def _task_executor(self, task: dict) -> None:
+        """개별 task 실행 스레드. 완료 후 세마포어를 반환하고 디스패처를 깨운다."""
+        # 첫 번째(task_id가 낮은) 작업이 Codex 워커를 우선 확보하도록 설정.
+        codex_runner.codex_priority.set(task["id"])
+        try:
+            self._run_skill_task(task)
+        except Exception as exc:
+            self.msg_queue.put(
+                ("log", f"[{task['skill_dir'].name}] worker 예외: {exc}")
+            )
+        finally:
             with self.queue_lock:
-                if self.skill_queue:
-                    task = self.skill_queue.pop(0)
-                    self.current_task = task
-                else:
-                    self.queue_event.clear()
-            if task is None:
-                continue
-            self.msg_queue.put(("queue_update", None))
-            try:
-                self._run_skill_task(task)
-            except Exception as exc:
-                self.msg_queue.put(
-                    ("log", f"[{task['skill_dir'].name}] worker 예외: {exc}")
-                )
-            with self.queue_lock:
-                self.current_task = None
+                if task in self.running_tasks:
+                    self.running_tasks.remove(task)
+            self._worker_sem.release()
             self.msg_queue.put(("queue_update", None))
             self.msg_queue.put(("task_done", None))
+            self.queue_event.set()  # 디스패처 깨우기 — 다음 task 시작 가능
 
     def _run_skill_task(self, task: dict) -> None:
         skill_dir: Path = task["skill_dir"]
@@ -560,50 +591,47 @@ class App:
                 renamed = template
             base_targets[name] = out_root / renamed
 
-        # Step 2: 모든 파일이 공통 -N 접미사를 쓰도록 증가
-        increment = 0
-        while True:
-            conflict = any(
-                _with_increment(p, increment).exists()
-                for p in base_targets.values()
-            )
-            if not conflict:
-                break
-            increment += 1
-
-        # Step 3: 저장
+        # Step 2+3: increment 계산과 ���일 쓰기를 원자적으로 수행
+        # (병렬 task가 동일 경로에 동시 접근하는 race condition 방지)
         prefix = f"{rel} → " if rel else ""
-        for name, content in outputs.items():
-            final = _with_increment(base_targets[name], increment)
-            final.parent.mkdir(parents=True, exist_ok=True)
-            final.write_bytes(content)
-            self.msg_queue.put(
-                ("log", f"[{skill_name}] OK {prefix}{final.name}")
-            )
+        with self._write_lock:
+            increment = 0
+            while True:
+                conflict = any(
+                    _with_increment(p, increment).exists()
+                    for p in base_targets.values()
+                )
+                if not conflict:
+                    break
+                increment += 1
+
+            for name, content in outputs.items():
+                final = _with_increment(base_targets[name], increment)
+                final.parent.mkdir(parents=True, exist_ok=True)
+                final.write_bytes(content)
+                self.msg_queue.put(
+                    ("log", f"[{skill_name}] OK {prefix}{final.name}")
+                )
 
     # ─────────────────────────────────────────────────────────
     # Queue 조작 버튼 핸들러
     # ─────────────────────────────────────────────────────────
-
-    def _has_current_task(self) -> bool:
-        with self.queue_lock:
-            return self.current_task is not None
 
     def on_move_up(self) -> None:
         sel = self.queue_listbox.curselection()
         if not sel:
             return
         idx = sel[0]
-        offset = 1 if self._has_current_task() else 0
-        q_idx = idx - offset
-        if q_idx <= 0:
-            return
         with self.queue_lock:
+            offset = len(self.running_tasks)
+            q_idx = idx - offset
             if 0 < q_idx < len(self.skill_queue):
                 self.skill_queue[q_idx - 1], self.skill_queue[q_idx] = (
                     self.skill_queue[q_idx],
                     self.skill_queue[q_idx - 1],
                 )
+            else:
+                return
         self._update_queue_listbox()
         new_idx = idx - 1
         if new_idx >= 0:
@@ -615,11 +643,9 @@ class App:
         if not sel:
             return
         idx = sel[0]
-        offset = 1 if self._has_current_task() else 0
-        q_idx = idx - offset
-        if q_idx < 0:
-            return
         with self.queue_lock:
+            offset = len(self.running_tasks)
+            q_idx = idx - offset
             if 0 <= q_idx < len(self.skill_queue) - 1:
                 self.skill_queue[q_idx], self.skill_queue[q_idx + 1] = (
                     self.skill_queue[q_idx + 1],
@@ -637,17 +663,20 @@ class App:
         if not sel:
             return
         idx = sel[0]
-        offset = 1 if self._has_current_task() else 0
-        q_idx = idx - offset
-        if q_idx < 0:
-            # 첫 항목(실행 중)을 선택한 경우 → 현재 중단과 동일
-            self.on_stop_current()
-            return
         with self.queue_lock:
-            if 0 <= q_idx < len(self.skill_queue):
+            offset = len(self.running_tasks)
+            q_idx = idx - offset
+            if q_idx < 0:
+                # 실행 중인 항목 선택 → 현재 중단과 동일
+                pass
+            elif 0 <= q_idx < len(self.skill_queue):
                 removed = self.skill_queue.pop(q_idx)
                 self._log(f"[queue] - {removed['label']}")
-        self._update_queue_listbox()
+                self._update_queue_listbox()
+                return
+            else:
+                return
+        self.on_stop_current()
 
     def on_stop_current(self) -> None:
         n = codex_runner.terminate_all_active()
@@ -666,9 +695,9 @@ class App:
         prev_idx = prev_sel[0] if prev_sel else None
         self.queue_listbox.delete(0, tk.END)
         with self.queue_lock:
-            if self.current_task is not None:
+            for task in self.running_tasks:
                 self.queue_listbox.insert(
-                    tk.END, f"▶ {self.current_task['label']}  (실행 중)"
+                    tk.END, f"▶ {task['label']}  (실행 중)"
                 )
             for task in self.skill_queue:
                 self.queue_listbox.insert(tk.END, f"   {task['label']}")

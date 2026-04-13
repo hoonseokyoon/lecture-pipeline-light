@@ -3,11 +3,11 @@ Step 6: 전체 merge."""
 
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Callable
 
-from codex_runner import CodexRunError, run_codex_task
+from codex_runner import CodexRunError, ContextThreadPoolExecutor, run_codex_task
 
 from _lib.schemas import COMPOSE_SCHEMA
 
@@ -461,7 +461,7 @@ def compose_pages_parallel(
         except Exception as exc:
             return (idx, None, str(exc))
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    with ContextThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(worker, idx): idx for idx in pending}
         done_count = 0
         for fut in as_completed(futures):

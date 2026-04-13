@@ -34,6 +34,8 @@ prompt + input files (+ optional scripts) -> output files 구조.
 사전 준비: WSL Ubuntu + Codex CLI 설치 + `codex auth login` (correct.py와 동일).
 """
 
+import contextvars
+import heapq
 import importlib.util
 import json
 import re
@@ -42,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -53,10 +56,83 @@ DEFAULT_TIMEOUT = 600
 DEFAULT_WSL_DISTRO = "Ubuntu"
 DEFAULT_MAX_CONCURRENT = 4
 
+# ── 우선순위 기반 Codex 동시 실행 제어 ──
+# 현재 스레드의 Codex 작업 우선순위. 낮을수록 높은 우선순위.
+# GUI에서 task_id를 설정하며, ContextThreadPoolExecutor를 통해 자식 스레드로 전파.
+codex_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "codex_priority", default=1000,
+)
+
+
+class PrioritySemaphore:
+    """우선순위 기반 세마포어.
+
+    release 시 대기열에서 priority 값이 가장 낮은(= 우선순위 높은) 스레드를
+    깨운다. 동일 우선순위 내에서는 FIFO.
+
+    priority는 ``codex_priority`` contextvar에서 자동으로 읽는다.
+    """
+
+    def __init__(self, value: int):
+        self._capacity = value
+        self._available = value
+        self._lock = threading.Lock()
+        self._counter = 0  # tie-breaker (FIFO within same priority)
+        self._waiters: list[tuple[int, int, threading.Event]] = []  # min-heap
+
+    def acquire(self, *, timeout: float | None = None) -> bool:
+        priority = codex_priority.get()
+        with self._lock:
+            if self._available > 0:
+                self._available -= 1
+                return True
+            event = threading.Event()
+            self._counter += 1
+            heapq.heappush(self._waiters, (priority, self._counter, event))
+
+        got = event.wait(timeout=timeout)
+        if got:
+            return True
+        # timeout — waiter 제거
+        with self._lock:
+            self._waiters = [
+                entry for entry in self._waiters if entry[2] is not event
+            ]
+            heapq.heapify(self._waiters)
+        return False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._waiters:
+                _, _, event = heapq.heappop(self._waiters)
+                event.set()
+            else:
+                self._available += 1
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
+class ContextThreadPoolExecutor(ThreadPoolExecutor):
+    """contextvars 컨텍스트를 워커 스레드로 전파하는 ThreadPoolExecutor.
+
+    Python 3.12+ 에서는 표준 TPE도 컨텍스트를 복사하지만, 이 클래스는
+    이전 버전에서도 동작을 보장한다.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        ctx = contextvars.copy_context()
+        return super().submit(ctx.run, fn, *args, **kwargs)
+
+
 # 전역 Codex 동시 실행 제한.
 # run_codex_task의 WSL subprocess 호출이 이 semaphore를 통과해야 함.
 # composite skill이 ThreadPoolExecutor로 fan-out해도 실제 동시성은 여기서 제한됨.
-_CODEX_SEMAPHORE = threading.BoundedSemaphore(DEFAULT_MAX_CONCURRENT)
+_CODEX_SEMAPHORE = PrioritySemaphore(DEFAULT_MAX_CONCURRENT)
 _SEMAPHORE_LOCK = threading.Lock()
 
 
@@ -66,7 +142,7 @@ def set_max_concurrent(n: int) -> None:
         raise ValueError("max_concurrent는 1 이상이어야 함")
     global _CODEX_SEMAPHORE
     with _SEMAPHORE_LOCK:
-        _CODEX_SEMAPHORE = threading.BoundedSemaphore(n)
+        _CODEX_SEMAPHORE = PrioritySemaphore(n)
 
 
 # 실행 중인 Codex subprocess 추적 — GUI의 "현재 작업 중단"에서 사용.
