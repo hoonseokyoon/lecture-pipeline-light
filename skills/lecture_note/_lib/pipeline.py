@@ -149,6 +149,7 @@ def run_pipeline(
     model = cfg.get("model", "gpt-5.4")
     align_effort = cfg.get("align_reasoning_effort", cfg.get("reasoning_effort", "high"))
     compose_effort = cfg.get("compose_reasoning_effort", cfg.get("reasoning_effort", "high"))
+    polish_effort = cfg.get("polish_reasoning_effort", compose_effort)
     service_tier = cfg.get("service_tier", "default")
     timeout = int(cfg.get("timeout", 2400))
     batch_size = int(cfg.get("batch_size", 12))
@@ -415,7 +416,7 @@ def run_pipeline(
         lecture_summary=lecture_summary,
         polish_cache_dir=cache.subdir("step5b_polished"),
         model=model,
-        reasoning_effort=compose_effort,
+        reasoning_effort=polish_effort,
         service_tier=service_tier,
         timeout=timeout,
         log_callback=log_callback,

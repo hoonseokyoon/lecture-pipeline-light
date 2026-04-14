@@ -10,6 +10,7 @@ anchors/brief 품질을 높인다.
 import base64
 import json
 import os
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -40,26 +41,39 @@ VISION_PROMPT = """\
 
 
 class _RateLimiter:
-    """Sliding window RPM 제한기. rpm=0이면 제한 없음."""
+    """Thread-safe sliding window RPM 제한기. rpm=0이면 제한 없음."""
 
     def __init__(self, rpm: int):
         self._rpm = rpm
+        self._lock = threading.Lock()
         self._timestamps: deque[float] = deque()
 
+    def set_rpm(self, rpm: int) -> None:
+        with self._lock:
+            self._rpm = rpm
+
     def wait(self) -> None:
-        if self._rpm <= 0:
-            return
-        now = time.monotonic()
-        # 1분 이상 된 타임스탬프 제거
-        while self._timestamps and now - self._timestamps[0] >= 60.0:
-            self._timestamps.popleft()
-        # 현재 윈도우에서 rpm 초과 시 대기
-        if len(self._timestamps) >= self._rpm:
-            sleep_for = 60.0 - (now - self._timestamps[0])
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            self._timestamps.popleft()
-        self._timestamps.append(time.monotonic())
+        with self._lock:
+            if self._rpm <= 0:
+                return
+            now = time.monotonic()
+            # 1분 이상 된 타임스탬프 제거
+            while self._timestamps and now - self._timestamps[0] >= 60.0:
+                self._timestamps.popleft()
+            # 현재 윈도우에서 rpm 초과 시 대기 시간 계산
+            sleep_for = 0.0
+            if len(self._timestamps) >= self._rpm:
+                sleep_for = 60.0 - (now - self._timestamps[0])
+                self._timestamps.popleft()
+        # lock 해제 후 sleep (다른 스레드 차단 방지)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        with self._lock:
+            self._timestamps.append(time.monotonic())
+
+
+# 프로그램 전역 싱글턴 — 모든 task/스레드가 공유
+_gemini_rate_limiter = _RateLimiter(DEFAULT_GEMINI_RPM)
 
 
 def _emit(log_callback: Callable[[str], None] | None, msg: str) -> None:
@@ -175,7 +189,7 @@ def enrich_pdf_pages(
 
     # Gemini 클라이언트 생성 (보강 대상이 있을 때만)
     client: genai.Client | None = None
-    rate_limiter = _RateLimiter(gemini_rpm)
+    _gemini_rate_limiter.set_rpm(gemini_rpm)
     if low_text_indices:
         try:
             client = _load_gemini_client()
@@ -184,7 +198,7 @@ def enrich_pdf_pages(
             low_text_indices = []  # 보강 대상 없음으로 처리
 
     if gemini_rpm > 0 and low_text_indices:
-        _emit(log_callback, f"[vision] RPM 제한: {gemini_rpm} req/min")
+        _emit(log_callback, f"[vision] RPM 제한: {gemini_rpm} req/min (프로그램 전역)")
 
     pages_meta: list[dict] = []
     enriched_count = 0
@@ -198,7 +212,7 @@ def enrich_pdf_pages(
         if is_low and client is not None:
             _emit(log_callback, f"[vision] page {page_num} — Gemini 호출 중...")
             try:
-                rate_limiter.wait()
+                _gemini_rate_limiter.wait()
                 img_bytes = render_page_image(pdf_path, i)
                 description = describe_slide_image(client, img_bytes, gemini_model)
                 # pdfplumber 텍스트가 조금이라도 있으면 병합

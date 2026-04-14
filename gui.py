@@ -15,6 +15,7 @@
 import json
 import os
 import queue
+import random
 import subprocess
 import sys
 import threading
@@ -56,6 +57,28 @@ GUI_CONFIG_PATH = SCRIPT_DIR / "gui_config.json"
 _SUBPROCESS_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 DEFAULT_LOG_MAX_LINES = 5000
+
+_ADJECTIVES = [
+    "amber", "blue", "bold", "calm", "cool", "crisp", "dark", "dawn",
+    "deep", "dusk", "fair", "fast", "firm", "gold", "gray", "haze",
+    "keen", "kind", "late", "lean", "live", "loud", "mild", "neat",
+    "pale", "pine", "pure", "rare", "rich", "rust", "sage", "silk",
+    "slim", "soft", "tall", "teal", "thin", "true", "vast", "warm",
+    "wild", "wise", "young", "zen",
+]
+_NOUNS = [
+    "arc", "ash", "bay", "bee", "bow", "cap", "cub", "dew", "elk",
+    "elm", "fin", "fog", "fox", "gem", "hawk", "hill", "ivy", "jade",
+    "jay", "kit", "lake", "lark", "leaf", "lynx", "mist", "moon",
+    "moss", "oak", "ore", "owl", "peak", "pine", "rain", "reef",
+    "ridge", "rock", "sage", "seal", "snow", "star", "stone", "tide",
+    "vale", "vine", "wave", "wing", "wolf", "wren", "yew",
+]
+
+
+def _generate_task_tag() -> str:
+    """adjective-noun 형태의 짧은 식별 태그 생성."""
+    return f"{random.choice(_ADJECTIVES)}-{random.choice(_NOUNS)}"
 
 
 def _load_gui_config() -> dict:
@@ -199,6 +222,14 @@ class App:
         self.transcribe_btn.pack(fill="x", pady=(0, 12))
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=4)
+
+        self._claude_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            right,
+            text="Claude Only 모드",
+            variable=self._claude_only_var,
+        ).pack(anchor="w", pady=(2, 4))
+
         ttk.Label(
             right, text="Skills (파일 선택 후 클릭):"
         ).pack(anchor="w", pady=(4, 2))
@@ -426,19 +457,24 @@ class App:
     def _enqueue_skill_task(self, skill_dir: Path, files: list[Path]) -> None:
         names = [p.name for p in files[:2]]
         suffix = f" (+{len(files) - 2})" if len(files) > 2 else ""
-        label = f"{skill_dir.name}: {', '.join(names)}{suffix}"
+        tag = _generate_task_tag()
+        label = f"[{tag}] {skill_dir.name}: {', '.join(names)}{suffix}"
+        claude_only = self._claude_only_var.get()
+        backend = "Claude" if claude_only else "Codex"
         task = {
             "id": self._next_task_id(),
+            "tag": tag,
             "skill_dir": skill_dir,
             "files": list(files),
             "workspace": self.workspace,
             "label": label,
             "status": "pending",
+            "claude_only": claude_only,
         }
         with self.queue_lock:
             self.skill_queue.append(task)
         self.queue_event.set()
-        self._log(f"[queue] + {label}")
+        self._log(f"[queue] + {label} ({backend})")
         self.msg_queue.put(("queue_update", None))
 
     def _queue_worker(self) -> None:
@@ -473,11 +509,14 @@ class App:
         """개별 task 실행 스레드. 완료 후 세마포어를 반환하고 디스패처를 깨운다."""
         # 첫 번째(task_id가 낮은) 작업이 Codex 워커를 우선 확보하도록 설정.
         codex_runner.codex_priority.set(task["id"])
+        # enqueue 시점에 캡처된 claude_only 값을 ContextVar로 설정 → composite skill 내부 전파
+        codex_runner.claude_only_mode.set(task.get("claude_only", False))
         try:
             self._run_skill_task(task)
         except Exception as exc:
+            tag = task.get("tag", "?")
             self.msg_queue.put(
-                ("log", f"[{task['skill_dir'].name}] worker 예외: {exc}")
+                ("log", f"[{tag}/{task['skill_dir'].name}] worker 예외: {exc}")
             )
         finally:
             with self.queue_lock:
@@ -493,14 +532,25 @@ class App:
         files: list[Path] = task["files"]
         ws: Path | None = task["workspace"]
         skill_name = skill_dir.name
+        tag = task.get("tag", "?")
+        claude_only = task.get("claude_only", False)
+        backend = "Claude" if claude_only else "Codex"
+        # 로그 prefix: [tag/skill_name]
+        prefix = f"{tag}/{skill_name}"
 
         try:
             skill = load_skill(skill_dir)
         except CodexRunError as exc:
             self.msg_queue.put(
-                ("log", f"[{skill_name}] skill 로드 실패: {exc}")
+                ("log", f"[{prefix}] skill 로드 실패: {exc}")
             )
             return
+
+        model = skill.config.get("model", codex_runner.DEFAULT_MODEL)
+        claude_model = skill.config.get(
+            "claude_model", codex_runner.DEFAULT_CLAUDE_MODEL,
+        )
+        display_model = claude_model if claude_only else model
 
         output_rel = skill.config.get("output_dir", "out")
         batch = bool(skill.config.get("batch", False))
@@ -509,7 +559,8 @@ class App:
         out_root = base / output_rel
 
         self.msg_queue.put(
-            ("log", f"[{skill_name}] ▶ 실행 시작: {len(files)}개 파일")
+            ("log", f"[{prefix}] ▶ 실행 시작: {len(files)}개 파일 "
+             f"| {backend} ({display_model})")
         )
 
         if batch:
@@ -518,8 +569,9 @@ class App:
                 outputs = run_skill(
                     skill_dir,
                     files,
-                    log_callback=lambda m, n=skill_name: self.msg_queue.put(
-                        ("log", f"[{n}] {m}")
+                    claude_only=claude_only,
+                    log_callback=lambda m, p=prefix: self.msg_queue.put(
+                        ("log", f"[{p}] {m}")
                     ),
                 )
                 self._write_outputs(
@@ -531,9 +583,9 @@ class App:
                     rel=None,
                 )
             except CodexRunError as exc:
-                self.msg_queue.put(("log", f"[{skill_name}] FAIL: {exc}"))
+                self.msg_queue.put(("log", f"[{prefix}] FAIL: {exc}"))
             except Exception as exc:
-                self.msg_queue.put(("log", f"[{skill_name}] 예외: {exc}"))
+                self.msg_queue.put(("log", f"[{prefix}] 예외: {exc}"))
             return
 
         for f in files:
@@ -543,13 +595,14 @@ class App:
                 rel = Path(f.name)
             try:
                 self.msg_queue.put(
-                    ("log", f"[{skill_name}] {rel} 실행 중...")
+                    ("log", f"[{prefix}] {rel} 실행 중...")
                 )
                 outputs = run_skill(
                     skill_dir,
                     [f],
-                    log_callback=lambda m, n=skill_name, r=rel: self.msg_queue.put(
-                        ("log", f"[{n}] {r} {m}")
+                    claude_only=claude_only,
+                    log_callback=lambda m, p=prefix, r=rel: self.msg_queue.put(
+                        ("log", f"[{p}] {r} {m}")
                     ),
                 )
                 self._write_outputs(
@@ -562,11 +615,11 @@ class App:
                 )
             except CodexRunError as exc:
                 self.msg_queue.put(
-                    ("log", f"[{skill_name}] FAIL {rel}: {exc}")
+                    ("log", f"[{prefix}] FAIL {rel}: {exc}")
                 )
             except Exception as exc:
                 self.msg_queue.put(
-                    ("log", f"[{skill_name}] 예외 {rel}: {exc}")
+                    ("log", f"[{prefix}] 예외 {rel}: {exc}")
                 )
 
     def _write_outputs(

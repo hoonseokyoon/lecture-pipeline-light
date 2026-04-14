@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,13 +56,30 @@ DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_SERVICE_TIER = "fast"
 DEFAULT_TIMEOUT = 600
 DEFAULT_WSL_DISTRO = "Ubuntu"
-DEFAULT_MAX_CONCURRENT = 4
+DEFAULT_MAX_CONCURRENT = 12
+DEFAULT_STAGGER_INTERVAL = 1.0  # Codex 호출 간 최소 간격(초). 0이면 비활성.
+
+# ── Claude CLI fallback ──
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
+
+_EFFORT_MAP: dict[str, str] = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+}
 
 # ── 우선순위 기반 Codex 동시 실행 제어 ──
 # 현재 스레드의 Codex 작업 우선순위. 낮을수록 높은 우선순위.
 # GUI에서 task_id를 설정하며, ContextThreadPoolExecutor를 통해 자식 스레드로 전파.
 codex_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
     "codex_priority", default=1000,
+)
+
+# Claude Only 모드. True이면 Codex를 skip하고 Claude CLI로만 실행.
+# ContextVar이므로 ContextThreadPoolExecutor를 통해 자식 스레드에 자동 전파.
+claude_only_mode: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "claude_only_mode", default=False,
 )
 
 
@@ -146,9 +164,38 @@ def set_max_concurrent(n: int) -> None:
         _CODEX_SEMAPHORE = PrioritySemaphore(n)
 
 
+# ── Codex 호출 간 최소 간격 (stagger) ──
+# 여러 스레드가 동시에 codex exec를 시작하면 API 서버에 burst가 몰림.
+# 각 호출 시작 시점 사이에 최소 interval(초)을 강제.
+_STAGGER_LOCK = threading.Lock()
+_STAGGER_INTERVAL = DEFAULT_STAGGER_INTERVAL
+_next_allowed_start: float = 0.0
+
+
+def set_stagger_interval(seconds: float) -> None:
+    """Codex 호출 간 최소 간격을 변경한다."""
+    global _STAGGER_INTERVAL
+    _STAGGER_INTERVAL = max(0.0, seconds)
+
+
+def _stagger_wait() -> None:
+    """다음 허용 시점까지 대기한 뒤 자신의 슬롯을 예약."""
+    global _next_allowed_start
+    if _STAGGER_INTERVAL <= 0:
+        return
+    with _STAGGER_LOCK:
+        now = time.monotonic()
+        wait_until = max(now, _next_allowed_start)
+        _next_allowed_start = wait_until + _STAGGER_INTERVAL
+    sleep_for = wait_until - time.monotonic()
+    if sleep_for > 0:
+        time.sleep(sleep_for)
+
+
 # 실행 중인 Codex subprocess 추적 — GUI의 "현재 작업 중단"에서 사용.
 _active_procs: "set[subprocess.Popen]" = set()
 _proc_lock = threading.Lock()
+_user_cancelled = threading.Event()  # 사용자 수동 중단 시그널
 
 
 def _register_proc(p: subprocess.Popen) -> None:
@@ -170,6 +217,7 @@ def terminate_all_active() -> int:
     Returns:
         kill 시도한 프로세스 수.
     """
+    _user_cancelled.set()  # fallback 방지 시그널
     with _proc_lock:
         procs = list(_active_procs)
     n = 0
@@ -199,12 +247,14 @@ def _run_tracked(
     cmd: list[str],
     timeout: int,
     kind: str,
+    cwd: str | None = None,
 ) -> tuple[int, str, str]:
     """Tracked Popen + communicate 헬퍼.
 
     - encoding="utf-8", errors="replace" 강제 (cp949 이슈 방지)
     - 실행 중 `_active_procs` 에 등록 → GUI가 terminate 가능
     - 타임아웃 시 프로세스 kill 후 CodexRunError raise
+    - cwd: 작업 디렉토리. None이면 현재 프로세스의 cwd.
 
     Returns:
         (returncode, stdout, stderr)
@@ -217,11 +267,12 @@ def _run_tracked(
             text=True,
             encoding="utf-8",
             errors="replace",
+            cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except FileNotFoundError as exc:
         raise CodexRunError(
-            "wsl 명령을 찾을 수 없음. WSL이 설치되어 있는지 확인."
+            f"{kind}: 실행 파일을 찾을 수 없음 ({cmd[0]!r})"
         ) from exc
 
     _register_proc(proc)
@@ -273,6 +324,85 @@ def _write_input(dest: Path, value) -> None:
         raise CodexRunError(
             f"지원하지 않는 입력 타입: {type(value).__name__} (name={dest.name})"
         )
+
+
+def _run_claude_task(
+    workdir: Path,
+    outputs_dir: Path,
+    output_schema: dict | None,
+    claude_model: str,
+    reasoning_effort: str,
+    timeout: int,
+    wsl_distro: str = DEFAULT_WSL_DISTRO,
+) -> None:
+    """Claude CLI(WSL)로 이미 세팅된 workdir의 작업을 실행한다.
+
+    Codex fallback / Claude Only 용. workdir에 inputs/, outputs/, prompt.txt 가
+    이미 존재하는 상태에서 WSL 내의 Claude CLI를 호출해 동일한 작업을 수행시킨다.
+
+    Codex와 동일하게 WSL sandbox에서 실행하므로, Claude가 tmpdir 밖의 원본
+    파일을 직접 수정할 위험이 없다.
+
+    Raises:
+        CodexRunError: Claude 실행 실패 또는 타임아웃.
+    """
+    effort = _EFFORT_MAP.get(reasoning_effort, "high")
+    wsl_dir = _win_to_wsl(workdir)
+
+    # 프롬프트 구성
+    task_instruction = "Read prompt.txt and execute the task described there."
+    req_txt = workdir / "scripts" / "requirements.txt"
+    if req_txt.exists():
+        task_instruction = (
+            "First, run `pip install -r scripts/requirements.txt` to install "
+            "dependencies. Then read prompt.txt and execute the task described there."
+        )
+
+    # WSL 내에서 실행할 인자를 개별 요소로 구성 → shell escaping 문제 회피
+    # wsl --cd + -- 로 직접 인자 전달 (bash -c 문자열 조립 X)
+    wsl_cmd: list[str] = [
+        "wsl", "-d", wsl_distro,
+        "--cd", wsl_dir,
+        "--",
+        "claude",
+        "-p", task_instruction,
+        "--model", claude_model,
+        "--effort", effort,
+        "--dangerously-skip-permissions",
+        "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep",
+        "--output-format", "json",
+        "--no-session-persistence",
+        "--max-turns", "50",
+    ]
+    if output_schema is not None:
+        schema_json = json.dumps(output_schema, ensure_ascii=False)
+        wsl_cmd.extend(["--json-schema", schema_json])
+
+    _stagger_wait()
+    with _CODEX_SEMAPHORE:
+        rc, stdout, stderr = _run_tracked(
+            cmd=wsl_cmd,
+            timeout=timeout,
+            kind="Claude fallback",
+        )
+
+    if rc != 0:
+        tail = (stderr or stdout or "")[-500:]
+        raise CodexRunError(f"Claude fallback 실패 (exit={rc}):\n{tail}")
+
+    # stdout JSON → _last_message.txt (기존 single-output fallback 경로 호환)
+    if stdout.strip():
+        try:
+            result_json = json.loads(stdout)
+            last_msg = result_json.get("result", "")
+            if last_msg:
+                (workdir / "_last_message.txt").write_text(
+                    last_msg, encoding="utf-8",
+                )
+        except (json.JSONDecodeError, AttributeError):
+            (workdir / "_last_message.txt").write_text(
+                stdout, encoding="utf-8",
+            )
 
 
 def _build_prompt(user_prompt: str, has_scripts: bool,
@@ -329,6 +459,9 @@ def run_codex_task(
     service_tier: str = DEFAULT_SERVICE_TIER,
     timeout: int = DEFAULT_TIMEOUT,
     wsl_distro: str = DEFAULT_WSL_DISTRO,
+    claude_fallback: bool = True,
+    claude_only: bool = False,
+    claude_model: str = DEFAULT_CLAUDE_MODEL,
 ) -> dict[str, bytes]:
     """Codex CLI로 prompt + inputs -> outputs 작업을 실행한다.
 
@@ -476,18 +609,56 @@ def run_codex_task(
             f'"Read prompt.txt and execute the task described there."'
         )
 
-        with _CODEX_SEMAPHORE:
-            rc, stdout, stderr = _run_tracked(
-                cmd=["wsl", "-d", wsl_distro, "bash", "-c", codex_cmd],
+        # claude_only: 파라미터 명시 > ContextVar (composite skill 전파용)
+        effective_claude_only = claude_only or claude_only_mode.get()
+        if effective_claude_only:
+            # Codex skip — Claude CLI로 직접 실행
+            _run_claude_task(
+                workdir=workdir,
+                outputs_dir=outputs_dir,
+                output_schema=output_schema,
+                claude_model=claude_model,
+                reasoning_effort=reasoning_effort,
                 timeout=timeout,
-                kind="Codex 실행",
+                wsl_distro=wsl_distro,
             )
+        else:
+            _stagger_wait()
+            codex_error: CodexRunError | None = None
+            with _CODEX_SEMAPHORE:
+                rc, stdout, stderr = _run_tracked(
+                    cmd=["wsl", "-d", wsl_distro, "bash", "-c", codex_cmd],
+                    timeout=timeout,
+                    kind="Codex 실행",
+                )
 
-        if rc != 0:
-            tail = (stderr or stdout or "")[-500:]
-            raise CodexRunError(
-                f"Codex 실행 실패 (exit={rc}):\n{tail}"
-            )
+            if rc != 0:
+                tail = (stderr or stdout or "")[-500:]
+                codex_error = CodexRunError(
+                    f"Codex 실행 실패 (exit={rc}):\n{tail}"
+                )
+
+            if codex_error is not None:
+                if not claude_fallback or _user_cancelled.is_set():
+                    _user_cancelled.clear()
+                    raise codex_error
+                # Claude CLI fallback — 동일 workdir 재사용
+                try:
+                    _run_claude_task(
+                        workdir=workdir,
+                        outputs_dir=outputs_dir,
+                        output_schema=output_schema,
+                        claude_model=claude_model,
+                        reasoning_effort=reasoning_effort,
+                        timeout=timeout,
+                        wsl_distro=wsl_distro,
+                    )
+                except CodexRunError as claude_exc:
+                    raise CodexRunError(
+                        f"Codex 실패 후 Claude fallback도 실패.\n"
+                    f"--- Codex ---\n{codex_error}\n"
+                    f"--- Claude ---\n{claude_exc}"
+                ) from claude_exc
 
         collected = _collect_outputs(outputs_dir)
 
@@ -790,6 +961,9 @@ def run_skill(
     service_tier: str | None = None,
     timeout: int | None = None,
     wsl_distro: str = DEFAULT_WSL_DISTRO,
+    claude_fallback: bool | None = None,
+    claude_only: bool | None = None,
+    claude_model: str | None = None,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict[str, bytes]:
     """skill을 로드해 주어진 입력 파일들에 대해 Codex 작업을 실행한다.
@@ -856,6 +1030,18 @@ def run_skill(
         timeout if timeout is not None
         else cfg.get("timeout", DEFAULT_TIMEOUT)
     )
+    final_claude_fallback = (
+        claude_fallback if claude_fallback is not None
+        else cfg.get("claude_fallback", True)
+    )
+    final_claude_only = (
+        claude_only if claude_only is not None
+        else cfg.get("claude_only", False)
+    )
+    final_claude_model = (
+        claude_model if claude_model is not None
+        else cfg.get("claude_model", DEFAULT_CLAUDE_MODEL)
+    )
 
     input_paths = [Path(p) for p in inputs]
     inputs_dict = skill.normalize(input_paths)
@@ -879,6 +1065,9 @@ def run_skill(
             service_tier=final_tier,
             timeout=final_timeout,
             wsl_distro=wsl_distro,
+            claude_fallback=final_claude_fallback,
+            claude_only=final_claude_only,
+            claude_model=final_claude_model,
         )
 
     retry_raw = cfg.get("retry_if_shrunk")
