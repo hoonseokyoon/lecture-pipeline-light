@@ -10,13 +10,20 @@
     "compose_parallel": 8,
     "compose_reasoning_effort": "high",
     "align_reasoning_effort": "xhigh",
-    "polish_reasoning_effort": "xhigh",
+    "polish_reasoning_effort": "medium",
+    "polish_timeout": 1200,
+    "polish_batch_size": 15,
+    "polish_overlap": 2,
     "vision_char_threshold": 40,
     "gemini_model": "gemma-4-31b-it",
     "gemini_rpm": 10,
+    "compact_reasoning_effort": "high",
+    "compact_parallel": 8,
+    "exam_cues_reasoning_effort": "high",
     "output_rename": {
         "note.md": "{stem}-note.md",
         "note.json": "{stem}-note.json",
-        "note.html": "{stem}-note.html"
+        "note.html": "{stem}-note.html",
+        "compact.html": "{stem}-compact.html"
     }
 }

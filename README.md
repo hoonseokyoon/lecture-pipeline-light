@@ -58,23 +58,95 @@ notebooklm login
 > 전사 중 `Authentication expired or invalid` 에러가 나면 `notebooklm login`을 다시 실행하세요.
 > 파이프라인 재실행 시 이미 완료된 파일은 건너뛰므로 중간부터 이어서 처리됩니다.
 
-### 3. WSL + Codex CLI 설치
+### 3. Codex CLI 설치 (Windows 네이티브)
 
-교정 기능에 필요합니다. 전사만 사용하려면 이 단계를 건너뛰고 `--no-correct` 옵션을 사용하세요.
+교정 및 skill 실행에 필요합니다. 전사만 사용하려면 `--no-correct` 옵션을 사용하세요.
 
 ```powershell
-# PowerShell (관리자 권한)
+# Node.js 필요: https://nodejs.org/
+npm install -g @openai/codex
+codex auth login
+```
+
+설치 확인:
+```powershell
+codex --version
+```
+
+> 이전 버전은 WSL 경유 Codex 호출을 썼지만 이제 Windows 네이티브로 직접 실행합니다.
+> `codex.cmd`/`codex.exe` 가 PATH 에 있으면 자동 감지. 커스텀 경로는 환경변수
+> `LECTURE_CODEX_PATH` 로 지정.
+
+### 4. git CLI
+
+Codex `--full-auto` 는 작업 디렉토리가 git repo 일 것을 요구합니다.
+`git --version` 으로 확인. 없으면 https://git-scm.com/ 에서 설치.
+
+### 5. (선택) Claude CLI — fallback 용
+
+Codex 실패 시 Claude 로 재시도하는 경로만 **WSL** 을 씁니다.
+fallback 이 필요 없으면 건너뜁니다.
+
+```powershell
 wsl --install -d Ubuntu
 ```
 
-재부팅 후 Ubuntu 초기 설정(사용자명/비밀번호)을 완료합니다.
-
 ```bash
 # WSL Ubuntu 내에서
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-sudo npm install -g @openai/codex
-codex auth login
+sudo npm install -g @anthropic-ai/claude-code
+claude /login
+```
+
+### 6. 스킬별 Python 의존성 (자동 처리)
+
+각 스킬의 `scripts/requirements.txt` 는 하네스가 **자동으로 venv 에 설치**합니다.
+첫 실행 시 한 번 빌드되고 이후 캐시. requirements.txt 가 바뀌면 자동 재빌드.
+
+캐시 위치: `%USERPROFILE%\.lecture-pipeline\venvs\<skill>\`
+
+### 7. (선택) Goose CLI — 대안 에이전트 백엔드
+
+Codex 대신 [Goose](https://github.com/aaif-goose/goose) (Block, Apache-2.0) 로 스킬을
+돌리고 싶을 때 사용. 스킬 `config.json` 에 `"backend": "goose"` 를 지정한 스킬만 이 경로로 흐릅니다.
+기본 스킬은 전부 Codex 로 동작하므로 Goose 가 없어도 됩니다.
+
+설치 (Windows):
+```powershell
+scoop bucket add extras
+scoop install goose   # Desktop 앱 + CLI 바이너리 포함
+```
+
+scoop 설치가 **Desktop 앱**만 PATH 에 등록하므로, CLI 바이너리 (`goose.exe`) 를
+PATH 에 별도로 노출해야 합니다. 아래 중 하나:
+
+- (권장) scoop 설치본의 CLI 추출 후 `%USERPROFILE%\scoop\shims\goose.exe` 에 복사
+- 또는 GitHub 릴리즈에서 `goose-x86_64-pc-windows-msvc.zip` 직접 다운로드 후 아무 디렉토리에 풀고
+  `LECTURE_GOOSE_PATH` 환경변수로 절대경로 지정
+
+> **주의**: scoop 이 만드는 `goose.cmd` 배치 shim 은 multi-line 프롬프트를
+> 손상시켜 goose 가 "please send the task" 응답만 반환하는 증상이 있습니다.
+> **반드시 `.exe` 를 직접 쓰세요** (하네스 resolver 가 자동으로 `.exe` 를 우선).
+
+공급자 설정:
+```powershell
+# 한 번만: 기본 공급자/모델 설정
+$env:GOOSE_PROVIDER = "openai"          # 또는 anthropic, gemini-cli, ollama, ...
+$env:GOOSE_MODEL = "gpt-5.4"
+# 공급자별 API 키 (OPENAI_API_KEY, ANTHROPIC_API_KEY, ...)
+```
+
+또는 `goose configure` 로 영속 저장.
+
+스킬 opt-in 예:
+```jsonc
+// skills/my_skill/config.json
+{
+    "backend": "goose",
+    "goose_provider": "openai",          // 선택 — 미지정시 GOOSE_PROVIDER env
+    "goose_model": "gpt-5.4",
+    "goose_max_turns": 30,
+    "goose_max_tool_repetitions": 3
+}
 ```
 
 ## 사용법

@@ -19,6 +19,9 @@ dist/
 # Claude session
 .claude/
 
+# Runtime logs
+.logs/
+
 # Legacy standalone configs
 correct_config.json
 correct_prompt.txt

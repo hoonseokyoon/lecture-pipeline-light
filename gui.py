@@ -10,12 +10,20 @@
 출력:
 - 스킬 결과는 `<workspace>/out/<skill_name>/<입력 상대경로 stem>/<output_name>`.
 - transcribe 결과는 transcribe_folder.py 관례대로 입력 파일 옆에 저장됨.
+
+구조:
+- `App` 은 Tk View 레이어: 위젯 빌드, 버튼 핸들러, msg_queue 폴링만 담당.
+- Skill 큐 로직은 `TaskQueueController`(task_queue.py) 가 소유.
+- 출력 파일 쓰기는 `OutputWriter`(output_writer.py) 가 담당.
+- Controller/Writer 는 tkinter 를 import 하지 않는다. 둘은 msg_queue 를 통해
+  App 에 이벤트를 올린다.
 """
 
 import json
+import logging
+import logging.handlers
 import os
 import queue
-import random
 import subprocess
 import sys
 import threading
@@ -48,7 +56,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import codex_runner  # noqa: E402
-from codex_runner import CodexRunError, load_skill, run_skill  # noqa: E402
+from codex_runner import CodexRunError, load_skill  # noqa: E402
+from output_writer import OutputWriter  # noqa: E402
+from task_queue import TaskQueueController  # noqa: E402
 
 
 SKILLS_DIR = SCRIPT_DIR / "skills"
@@ -57,28 +67,6 @@ GUI_CONFIG_PATH = SCRIPT_DIR / "gui_config.json"
 _SUBPROCESS_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 DEFAULT_LOG_MAX_LINES = 5000
-
-_ADJECTIVES = [
-    "amber", "blue", "bold", "calm", "cool", "crisp", "dark", "dawn",
-    "deep", "dusk", "fair", "fast", "firm", "gold", "gray", "haze",
-    "keen", "kind", "late", "lean", "live", "loud", "mild", "neat",
-    "pale", "pine", "pure", "rare", "rich", "rust", "sage", "silk",
-    "slim", "soft", "tall", "teal", "thin", "true", "vast", "warm",
-    "wild", "wise", "young", "zen",
-]
-_NOUNS = [
-    "arc", "ash", "bay", "bee", "bow", "cap", "cub", "dew", "elk",
-    "elm", "fin", "fog", "fox", "gem", "hawk", "hill", "ivy", "jade",
-    "jay", "kit", "lake", "lark", "leaf", "lynx", "mist", "moon",
-    "moss", "oak", "ore", "owl", "peak", "pine", "rain", "reef",
-    "ridge", "rock", "sage", "seal", "snow", "star", "stone", "tide",
-    "vale", "vine", "wave", "wing", "wolf", "wren", "yew",
-]
-
-
-def _generate_task_tag() -> str:
-    """adjective-noun 형태의 짧은 식별 태그 생성."""
-    return f"{random.choice(_ADJECTIVES)}-{random.choice(_NOUNS)}"
 
 
 def _load_gui_config() -> dict:
@@ -91,27 +79,66 @@ def _load_gui_config() -> dict:
         return {}
 
 
-def _derive_primary_stem(files: list[Path]) -> str:
-    """Batch 모드의 {stem} 추출 기준.
+class TkQueueHandler(logging.Handler):
+    """logging.Handler: 로그 레코드를 GUI의 msg_queue로 전달.
 
-    - PDF가 있으면 **첫 PDF** 의 stem
-    - 없으면 첫 입력 파일의 stem
-    - 입력 없으면 "untitled"
+    Tk 메인 스레드가 `msg_queue`를 `_poll_queue`로 소비하므로, 어느 스레드에서
+    `logger.info()`를 호출해도 안전하게 GUI에 도달한다.
     """
-    for f in files:
-        if f.suffix.lower() == ".pdf":
-            return f.stem
-    return files[0].stem if files else "untitled"
+
+    def __init__(self, msg_queue: "queue.Queue[tuple[str, object]]"):
+        super().__init__()
+        self._q = msg_queue
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._q.put(("log", self.format(record)))
+        except Exception:
+            self.handleError(record)
 
 
-def _with_increment(path: Path, n: int) -> Path:
-    """n==0이면 원본 path, n>0이면 `<stem>-<n><suffix>` 형태."""
-    if n <= 0:
-        return path
-    return path.with_name(f"{path.stem}-{n}{path.suffix}")
+def _setup_logging(msg_queue: "queue.Queue[tuple[str, object]]") -> None:
+    """프로세스 전체 logging 구성. GUI 핸들러 + (가능하면) 회전 파일 핸들러.
+
+    `lecture_pipeline` 네임스페이스에만 핸들러를 붙인다. codex_runner 등이
+    `logging.getLogger("lecture_pipeline.codex_runner")`를 쓰므로 전부 여기로
+    라우팅. root 로거는 건드리지 않아 외부 라이브러리 로그는 흡수하지 않음.
+    """
+    root = logging.getLogger("lecture_pipeline")
+    root.setLevel(logging.DEBUG)
+    # root 로거까지 bubble up 방지 (이미 자체 핸들러로 소비 완료).
+    root.propagate = False
+    # 재구성 시 중복 부착 방지.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    gui_handler = TkQueueHandler(msg_queue)
+    gui_handler.setLevel(logging.INFO)
+    gui_handler.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(gui_handler)
+
+    # 파일 로그(DEBUG 포함). 실패해도 GUI는 계속 동작.
+    try:
+        log_dir = SCRIPT_DIR / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_dir / "lecture_pipeline.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        root.addHandler(file_handler)
+    except OSError:
+        pass
 
 
 class App:
+    """Tk View. 큐/실행/출력 로직은 controller/writer 에 위임."""
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Lecture Pipeline")
@@ -136,28 +163,38 @@ class App:
         if self.max_concurrent_tasks < 1:
             self.max_concurrent_tasks = 1
 
+        # Codex/Claude subprocess 전역 동시 실행 한도.
+        # 단순 task 는 task 1개 = subprocess 1개이지만, composite skill 이
+        # 내부에서 fan-out 할 때는 task 수 < subprocess 수 가 되므로 별도 설정이
+        # 합리적. `gui_config.json` 에 명시 안 하면 task 한도를 따라감.
+        try:
+            self.max_concurrent_codex = int(
+                gui_cfg.get("max_concurrent_codex", self.max_concurrent_tasks)
+            )
+        except (TypeError, ValueError):
+            self.max_concurrent_codex = self.max_concurrent_tasks
+        if self.max_concurrent_codex < 1:
+            self.max_concurrent_codex = 1
+        codex_runner.set_max_concurrent(self.max_concurrent_codex)
+
         self.workspace: Path | None = None
         self.transcribe_busy = False
         self.msg_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
-        # ── Skill 작업 큐 (Transcribe와 독립) ──
-        self.skill_queue: list[dict] = []
-        self.running_tasks: list[dict] = []
-        self._worker_sem = threading.Semaphore(self.max_concurrent_tasks)
-        self._write_lock = threading.Lock()
-        self.queue_lock = threading.Lock()
-        self.queue_event = threading.Event()
-        self._task_id_counter = 0
-        self.shutting_down = False
+        # logging: codex_runner 등이 사용하는 `lecture_pipeline` 네임스페이스
+        # 로거에 GUI 핸들러 + 회전 파일 핸들러 부착.
+        _setup_logging(self.msg_queue)
+
+        # 출력 쓰기 + 큐 컨트롤러. controller 생성과 동시에 디스패처 스레드 가동.
+        self.writer = OutputWriter(self.msg_queue)
+        self.controller = TaskQueueController(
+            max_concurrent_tasks=self.max_concurrent_tasks,
+            msg_queue=self.msg_queue,
+            output_writer=self.writer,
+        )
 
         self._build_ui()
         self._poll_queue()
-
-        # 큐 디스패처 스레드 시작
-        self.worker_thread = threading.Thread(
-            target=self._queue_worker, daemon=True,
-        )
-        self.worker_thread.start()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ─────────────────────────────────────────────────────────
@@ -408,12 +445,12 @@ class App:
             self.msg_queue.put(("transcribe_done", None))
 
     # ─────────────────────────────────────────────────────────
-    # Skill 실행 — 큐 예약 방식
+    # Skill 실행 — 큐 예약 방식 (위임)
     # ─────────────────────────────────────────────────────────
 
     def on_skill(self, skill_dir: Path):
-        """버튼 클릭: 큐에 추가. 스킬 config 의 `ask_file_order` 가 true 면
-        FileOrderDialog 팝업으로 사용자가 순서 지정."""
+        """버튼 클릭: 큐에 추가. 스킬 config 의 `ask_file_order` / `ask_conditioning`
+        플래그를 보고 필요한 입력 모달 실행 후 controller.enqueue 로 전달."""
         if not self.workspace:
             return
         files = self._get_selected_files()
@@ -423,7 +460,7 @@ class App:
             )
             return
 
-        # config 로드해서 ask_file_order 플래그 확인
+        # config 로드해서 ask_* 플래그 확인
         try:
             skill = load_skill(skill_dir)
         except CodexRunError as exc:
@@ -448,328 +485,101 @@ class App:
                 return
             files = dlg.result
 
-        self._enqueue_skill_task(skill_dir, files)
-
-    def _next_task_id(self) -> int:
-        self._task_id_counter += 1
-        return self._task_id_counter
-
-    def _enqueue_skill_task(self, skill_dir: Path, files: list[Path]) -> None:
-        names = [p.name for p in files[:2]]
-        suffix = f" (+{len(files) - 2})" if len(files) > 2 else ""
-        tag = _generate_task_tag()
-        label = f"[{tag}] {skill_dir.name}: {', '.join(names)}{suffix}"
-        claude_only = self._claude_only_var.get()
-        backend = "Claude" if claude_only else "Codex"
-        task = {
-            "id": self._next_task_id(),
-            "tag": tag,
-            "skill_dir": skill_dir,
-            "files": list(files),
-            "workspace": self.workspace,
-            "label": label,
-            "status": "pending",
-            "claude_only": claude_only,
-        }
-        with self.queue_lock:
-            self.skill_queue.append(task)
-        self.queue_event.set()
-        self._log(f"[queue] + {label} ({backend})")
-        self.msg_queue.put(("queue_update", None))
-
-    def _queue_worker(self) -> None:
-        """큐의 task를 병렬 디스패치하는 daemon 스레드.
-
-        _worker_sem이 허용하는 만큼 동시에 실행하고,
-        Codex 레벨 동시성은 codex_runner._CODEX_SEMAPHORE가 제어."""
-        while not self.shutting_down:
-            self.queue_event.wait(timeout=0.5)
-            if self.shutting_down:
+        conditioning_text: str | None = None
+        if bool(skill.config.get("ask_conditioning", False)):
+            from conditioning_dialog import ConditioningDialog
+            cdlg = ConditioningDialog(
+                self.root, files[0],
+                title=f"{skill_dir.name}: 지시어 입력",
+            )
+            cdlg.show_modal()
+            self.root.wait_window(cdlg)
+            if cdlg.result is None:
+                self._log(
+                    f"[{skill_dir.name}] 지시어 입력 취소 — 큐 추가 안 함"
+                )
                 return
-            # 세마포어 여유분만큼 큐에서 꺼내 실행
-            while not self.shutting_down:
-                if not self._worker_sem.acquire(timeout=0):
-                    break  # 실행 슬롯 없음
-                task = None
-                with self.queue_lock:
-                    if self.skill_queue:
-                        task = self.skill_queue.pop(0)
-                        self.running_tasks.append(task)
-                    else:
-                        self.queue_event.clear()
-                if task is None:
-                    self._worker_sem.release()
-                    break
-                self.msg_queue.put(("queue_update", None))
-                threading.Thread(
-                    target=self._task_executor, args=(task,), daemon=True,
-                ).start()
+            conditioning_text = cdlg.result["text"]
 
-    def _task_executor(self, task: dict) -> None:
-        """개별 task 실행 스레드. 완료 후 세마포어를 반환하고 디스패처를 깨운다."""
-        # 첫 번째(task_id가 낮은) 작업이 Codex 워커를 우선 확보하도록 설정.
-        codex_runner.codex_priority.set(task["id"])
-        # enqueue 시점에 캡처된 claude_only 값을 ContextVar로 설정 → composite skill 내부 전파
-        codex_runner.claude_only_mode.set(task.get("claude_only", False))
-        try:
-            self._run_skill_task(task)
-        except Exception as exc:
-            tag = task.get("tag", "?")
-            self.msg_queue.put(
-                ("log", f"[{tag}/{task['skill_dir'].name}] worker 예외: {exc}")
-            )
-        finally:
-            with self.queue_lock:
-                if task in self.running_tasks:
-                    self.running_tasks.remove(task)
-            self._worker_sem.release()
-            self.msg_queue.put(("queue_update", None))
-            self.msg_queue.put(("task_done", None))
-            self.queue_event.set()  # 디스패처 깨우기 — 다음 task 시작 가능
-
-    def _run_skill_task(self, task: dict) -> None:
-        skill_dir: Path = task["skill_dir"]
-        files: list[Path] = task["files"]
-        ws: Path | None = task["workspace"]
-        skill_name = skill_dir.name
-        tag = task.get("tag", "?")
-        claude_only = task.get("claude_only", False)
-        backend = "Claude" if claude_only else "Codex"
-        # 로그 prefix: [tag/skill_name]
-        prefix = f"{tag}/{skill_name}"
-
-        try:
-            skill = load_skill(skill_dir)
-        except CodexRunError as exc:
-            self.msg_queue.put(
-                ("log", f"[{prefix}] skill 로드 실패: {exc}")
-            )
-            return
-
-        model = skill.config.get("model", codex_runner.DEFAULT_MODEL)
-        claude_model = skill.config.get(
-            "claude_model", codex_runner.DEFAULT_CLAUDE_MODEL,
-        )
-        display_model = claude_model if claude_only else model
-
-        output_rel = skill.config.get("output_dir", "out")
-        batch = bool(skill.config.get("batch", False))
-        rename_map: dict[str, str] = skill.config.get("output_rename", {}) or {}
-        base = ws if ws else files[0].parent
-        out_root = base / output_rel
-
-        self.msg_queue.put(
-            ("log", f"[{prefix}] ▶ 실행 시작: {len(files)}개 파일 "
-             f"| {backend} ({display_model})")
+        self.controller.enqueue(
+            skill_dir=skill_dir,
+            files=files,
+            workspace=self.workspace,
+            claude_only=self._claude_only_var.get(),
+            conditioning_text=conditioning_text,
         )
 
-        if batch:
-            stem = _derive_primary_stem(files)
-            try:
-                outputs = run_skill(
-                    skill_dir,
-                    files,
-                    claude_only=claude_only,
-                    log_callback=lambda m, p=prefix: self.msg_queue.put(
-                        ("log", f"[{p}] {m}")
-                    ),
-                )
-                self._write_outputs(
-                    outputs=outputs,
-                    out_root=out_root,
-                    rename_map=rename_map,
-                    stem=stem,
-                    skill_name=skill_name,
-                    rel=None,
-                )
-            except CodexRunError as exc:
-                self.msg_queue.put(("log", f"[{prefix}] FAIL: {exc}"))
-            except Exception as exc:
-                self.msg_queue.put(("log", f"[{prefix}] 예외: {exc}"))
-            return
-
-        for f in files:
-            try:
-                rel = f.relative_to(ws) if ws else Path(f.name)
-            except ValueError:
-                rel = Path(f.name)
-            try:
-                self.msg_queue.put(
-                    ("log", f"[{prefix}] {rel} 실행 중...")
-                )
-                outputs = run_skill(
-                    skill_dir,
-                    [f],
-                    claude_only=claude_only,
-                    log_callback=lambda m, p=prefix, r=rel: self.msg_queue.put(
-                        ("log", f"[{p}] {r} {m}")
-                    ),
-                )
-                self._write_outputs(
-                    outputs=outputs,
-                    out_root=out_root,
-                    rename_map=rename_map,
-                    stem=f.stem,
-                    skill_name=skill_name,
-                    rel=rel,
-                )
-            except CodexRunError as exc:
-                self.msg_queue.put(
-                    ("log", f"[{prefix}] FAIL {rel}: {exc}")
-                )
-            except Exception as exc:
-                self.msg_queue.put(
-                    ("log", f"[{prefix}] 예외 {rel}: {exc}")
-                )
-
-    def _write_outputs(
-        self,
-        outputs: dict[str, bytes],
-        out_root: Path,
-        rename_map: dict[str, str],
-        stem: str,
-        skill_name: str,
-        rel: Path | None,
-    ) -> None:
-        """출력 파일들을 `out_root` 아래(플랫)에 저장.
-
-        - `rename_map`의 템플릿 ({stem} 치환)으로 파일명 변환
-        - 여러 출력이 있으면 **공통 -N suffix**를 계산해 충돌 회피
-          (lecture_note의 note.md/json/html이 같은 접미사 공유)
-        """
-        if not outputs:
-            return
-        out_root.mkdir(parents=True, exist_ok=True)
-
-        # Step 1: rename 적용해 target path 결정 (increment 전)
-        base_targets: dict[str, Path] = {}
-        for name in outputs.keys():
-            template = rename_map.get(name, name)
-            try:
-                renamed = template.format(stem=stem)
-            except (KeyError, IndexError, ValueError):
-                renamed = template
-            base_targets[name] = out_root / renamed
-
-        # Step 2+3: increment 계산과 ���일 쓰기를 원자적으로 수행
-        # (병렬 task가 동일 경로에 동시 접근하는 race condition 방지)
-        prefix = f"{rel} → " if rel else ""
-        with self._write_lock:
-            increment = 0
-            while True:
-                conflict = any(
-                    _with_increment(p, increment).exists()
-                    for p in base_targets.values()
-                )
-                if not conflict:
-                    break
-                increment += 1
-
-            for name, content in outputs.items():
-                final = _with_increment(base_targets[name], increment)
-                final.parent.mkdir(parents=True, exist_ok=True)
-                final.write_bytes(content)
-                self.msg_queue.put(
-                    ("log", f"[{skill_name}] OK {prefix}{final.name}")
-                )
-
     # ─────────────────────────────────────────────────────────
-    # Queue 조작 버튼 핸들러
+    # Queue 조작 버튼 핸들러 (controller 위임)
     # ─────────────────────────────────────────────────────────
+
+    def _queue_index_to_pending(self, listbox_idx: int) -> int:
+        """listbox 인덱스를 pending queue 인덱스로 변환. 음수면 running 구간."""
+        running, _ = self.controller.snapshot()
+        return listbox_idx - len(running)
 
     def on_move_up(self) -> None:
         sel = self.queue_listbox.curselection()
         if not sel:
             return
         idx = sel[0]
-        with self.queue_lock:
-            offset = len(self.running_tasks)
-            q_idx = idx - offset
-            if 0 < q_idx < len(self.skill_queue):
-                self.skill_queue[q_idx - 1], self.skill_queue[q_idx] = (
-                    self.skill_queue[q_idx],
-                    self.skill_queue[q_idx - 1],
-                )
-            else:
-                return
-        self._update_queue_listbox()
-        new_idx = idx - 1
-        if new_idx >= 0:
-            self.queue_listbox.selection_clear(0, tk.END)
-            self.queue_listbox.selection_set(new_idx)
+        q_idx = self._queue_index_to_pending(idx)
+        if self.controller.move_pending_up(q_idx):
+            self._update_queue_listbox()
+            new_idx = idx - 1
+            if new_idx >= 0:
+                self.queue_listbox.selection_clear(0, tk.END)
+                self.queue_listbox.selection_set(new_idx)
 
     def on_move_down(self) -> None:
         sel = self.queue_listbox.curselection()
         if not sel:
             return
         idx = sel[0]
-        with self.queue_lock:
-            offset = len(self.running_tasks)
-            q_idx = idx - offset
-            if 0 <= q_idx < len(self.skill_queue) - 1:
-                self.skill_queue[q_idx], self.skill_queue[q_idx + 1] = (
-                    self.skill_queue[q_idx + 1],
-                    self.skill_queue[q_idx],
-                )
-            else:
-                return
-        self._update_queue_listbox()
-        new_idx = idx + 1
-        self.queue_listbox.selection_clear(0, tk.END)
-        self.queue_listbox.selection_set(new_idx)
+        q_idx = self._queue_index_to_pending(idx)
+        if self.controller.move_pending_down(q_idx):
+            self._update_queue_listbox()
+            new_idx = idx + 1
+            self.queue_listbox.selection_clear(0, tk.END)
+            self.queue_listbox.selection_set(new_idx)
 
     def on_cancel_selected(self) -> None:
         sel = self.queue_listbox.curselection()
         if not sel:
             return
-        idx = sel[0]
-        with self.queue_lock:
-            offset = len(self.running_tasks)
-            q_idx = idx - offset
-            if q_idx < 0:
-                # 실행 중인 항목 선택 → 현재 중단과 동일
-                pass
-            elif 0 <= q_idx < len(self.skill_queue):
-                removed = self.skill_queue.pop(q_idx)
-                self._log(f"[queue] - {removed['label']}")
-                self._update_queue_listbox()
-                return
-            else:
-                return
-        self.on_stop_current()
+        q_idx = self._queue_index_to_pending(sel[0])
+        if q_idx < 0:
+            # 실행 중인 항목 선택 → 현재 중단과 동일
+            self.on_stop_current()
+            return
+        if self.controller.remove_pending(q_idx) is not None:
+            self._update_queue_listbox()
 
     def on_stop_current(self) -> None:
-        n = codex_runner.terminate_all_active()
-        self._log(f"[queue] 현재 작업 중단 시도 — {n}개 subprocess kill")
+        self.controller.cancel_current()
 
     def on_clear_queue(self) -> None:
-        with self.queue_lock:
-            cleared = len(self.skill_queue)
-            self.skill_queue.clear()
-        if cleared:
-            self._log(f"[queue] 대기열 {cleared}개 제거")
+        self.controller.clear_pending()
         self._update_queue_listbox()
 
     def _update_queue_listbox(self) -> None:
         prev_sel = self.queue_listbox.curselection()
         prev_idx = prev_sel[0] if prev_sel else None
         self.queue_listbox.delete(0, tk.END)
-        with self.queue_lock:
-            for task in self.running_tasks:
-                self.queue_listbox.insert(
-                    tk.END, f"▶ {task['label']}  (실행 중)"
-                )
-            for task in self.skill_queue:
-                self.queue_listbox.insert(tk.END, f"   {task['label']}")
-        # 선택 복원 (가능한 경우)
+        running, pending = self.controller.snapshot()
+        for task in running:
+            self.queue_listbox.insert(
+                tk.END, f"▶ {task['label']}  (실행 중)"
+            )
+        for task in pending:
+            self.queue_listbox.insert(tk.END, f"   {task['label']}")
         if prev_idx is not None:
             size = self.queue_listbox.size()
             if 0 <= prev_idx < size:
                 self.queue_listbox.selection_set(prev_idx)
 
     def _on_close(self) -> None:
-        self.shutting_down = True
-        self.queue_event.set()
+        self.controller.shutdown()
         try:
             self.root.destroy()
         except Exception:

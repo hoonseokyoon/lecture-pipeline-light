@@ -16,7 +16,13 @@ from codex_runner import CodexRunError, load_skill, run_skill
 from _lib.align import align_pages_batched
 from _lib.batching import compute_run_id
 from _lib.checkpoint import CheckpointDir
+from _lib.compact_compose import compact_compose_parallel
+from _lib.compact_exporter import build_compact_html
+from _lib.compact_glossary import reorganize_glossary
+from _lib.compact_polish import polish_compact_pages
+from _lib.compact_summary import build_compact_summary
 from _lib.compose import compose_pages_parallel, merge_pages
+from _lib.exam_cues import extract_exam_cues
 from _lib.exporter import build_note_html, build_note_json, render_pdf_pages_base64
 from _lib.lecture_summary import generate_lecture_summary
 from _lib.numbering import number_transcripts
@@ -149,7 +155,10 @@ def run_pipeline(
     model = cfg.get("model", "gpt-5.4")
     align_effort = cfg.get("align_reasoning_effort", cfg.get("reasoning_effort", "high"))
     compose_effort = cfg.get("compose_reasoning_effort", cfg.get("reasoning_effort", "high"))
-    polish_effort = cfg.get("polish_reasoning_effort", compose_effort)
+    polish_effort = cfg.get("polish_reasoning_effort", "medium")
+    polish_timeout = int(cfg.get("polish_timeout", 1200))
+    polish_batch_size = int(cfg.get("polish_batch_size", 15))
+    polish_overlap = int(cfg.get("polish_overlap", 2))
     service_tier = cfg.get("service_tier", "default")
     timeout = int(cfg.get("timeout", 2400))
     batch_size = int(cfg.get("batch_size", 12))
@@ -158,6 +167,10 @@ def run_pipeline(
     vision_threshold = int(cfg.get("vision_char_threshold", 40))
     gemini_model = cfg.get("gemini_model", "gemma-4-31b-it")
     gemini_rpm = int(cfg.get("gemini_rpm", 0))
+    # compact + exam 확장
+    compact_effort = cfg.get("compact_reasoning_effort", compose_effort)
+    compact_workers = int(cfg.get("compact_parallel", compose_workers))
+    exam_cues_effort = cfg.get("exam_cues_reasoning_effort", align_effort)
 
     # Run id + checkpoint dir
     run_id = compute_run_id(input_paths)
@@ -408,18 +421,65 @@ def run_pipeline(
     )
     _emit(log_callback, f"[step5] 완료 — {len(page_notes)}/{num_pages}페이지")
 
-    # ── Step 5b: 전체 페이지 polish (단일 Codex 호출, 파일 편집 기반) ──
-    _emit(log_callback, "[step5b] 전체 폴리시 호출...")
+    # ── Step 5a: compact per-page 재작성 (병렬, exam_cues 없이) ──
+    _emit(
+        log_callback,
+        f"[step5a] compact 재작성 시작 (병렬 {compact_workers})...",
+    )
+    compact_pages = compact_compose_parallel(
+        slides_data=slides_data,
+        mapping=mapping,
+        numbered_txts=numbered,
+        page_notes=page_notes,
+        exam_cues=None,
+        lecture_summary=lecture_summary,
+        pages_dir=cache.subdir("step5a_compact_pages"),
+        model=model,
+        reasoning_effort=compact_effort,
+        service_tier=service_tier,
+        timeout=timeout,
+        max_workers=compact_workers,
+        log_callback=log_callback,
+    )
+    _emit(
+        log_callback,
+        f"[step5a] 완료 — {len(compact_pages)}/{num_pages}페이지",
+    )
+
+    # ── Step 5b: sliding-window polish (compact 참조) ──
+    _emit(log_callback, "[step5b] polish 시작 (sliding window)...")
     page_notes = polish_pages(
         page_notes=page_notes,
+        compact_pages=compact_pages,
         slides_data=slides_data,
         lecture_summary=lecture_summary,
         polish_cache_dir=cache.subdir("step5b_polished"),
         model=model,
         reasoning_effort=polish_effort,
         service_tier=service_tier,
-        timeout=timeout,
+        timeout=polish_timeout,
+        batch_size=polish_batch_size,
+        overlap=polish_overlap,
         log_callback=log_callback,
+    )
+
+    # ── Step 5c: compact narrative polish (sliding window) ──
+    _emit(log_callback, "[step5c] compact polish 시작 (sliding window)...")
+    compact_pages = polish_compact_pages(
+        compact_pages=compact_pages,
+        lecture_summary=lecture_summary,
+        polish_cache_dir=cache.subdir("step5c_compact_polished"),
+        model=model,
+        reasoning_effort=polish_effort,
+        service_tier=service_tier,
+        timeout=polish_timeout,
+        batch_size=polish_batch_size,
+        overlap=polish_overlap,
+        log_callback=log_callback,
+    )
+    _emit(
+        log_callback,
+        f"[step5c] 완료 — {len(compact_pages)}/{num_pages}페이지",
     )
 
     # ── Step 6: merge ──
@@ -468,8 +528,104 @@ def run_pipeline(
     note_html_bytes = cache.get_or_compute_bytes("step8_note.html", _run_export_html)
     _emit(log_callback, f"[step8] 완료 — note.html {len(note_html_bytes)} bytes")
 
+    # ── Step 9: 교수자의 시험 관련 코멘트 + 슬라이드 강조 추출 ──
+    def _run_exam_cues() -> dict:
+        return extract_exam_cues(
+            numbered=numbered,
+            mapping=mapping,
+            slides_data=slides_data,
+            lecture_summary=lecture_summary,
+            model=model,
+            reasoning_effort=exam_cues_effort,
+            service_tier=service_tier,
+            timeout=timeout,
+            log_callback=log_callback,
+        )
+
+    exam_cues = cache.get_or_compute_json("step9_exam_cues.json", _run_exam_cues)
+    _emit(
+        log_callback,
+        f"[step9] 완료 — 시험 코멘트 "
+        f"{len(exam_cues.get('professor_exam_comments', []))}건",
+    )
+
+    # (compact_pages는 step5a에서 이미 생성됨 — step9 이후 재사용)
+
+    # ── Step 10: glossary 재구성 ──
+    def _run_compact_glossary() -> dict:
+        return reorganize_glossary(
+            glossary_md=glossary_md,
+            compact_pages=compact_pages,
+            slides_data=slides_data,
+            lecture_summary=lecture_summary,
+            model=model,
+            reasoning_effort=compact_effort,
+            service_tier=service_tier,
+            timeout=timeout,
+            log_callback=log_callback,
+        )
+
+    compact_glossary = cache.get_or_compute_json(
+        "step10_compact_glossary.json", _run_compact_glossary,
+    )
+    _emit(
+        log_callback,
+        f"[step10] 완료 — {len(compact_glossary.get('categories', []))} 카테고리",
+    )
+
+    # ── Step 11: 핵심 요약노트 ──
+    def _run_compact_summary() -> dict:
+        return build_compact_summary(
+            lecture_summary=lecture_summary,
+            compact_pages=compact_pages,
+            exam_cues=exam_cues,
+            slides_data=slides_data,
+            model=model,
+            reasoning_effort=compact_effort,
+            service_tier=service_tier,
+            timeout=timeout,
+            log_callback=log_callback,
+        )
+
+    compact_summary = cache.get_or_compute_json(
+        "step11_compact_summary.json", _run_compact_summary,
+    )
+    has_exam_notes = bool(
+        (compact_summary.get("professor_exam_notes_md") or "").strip()
+    )
+    _emit(
+        log_callback,
+        f"[step11] 완료 — 교수 시험 코멘트 섹션 {'있음' if has_exam_notes else '없음'}",
+    )
+
+    # ── Step 12: compact HTML 빌드 ──
+    def _run_compact_html() -> bytes:
+        _emit(log_callback, "[step12] compact.html 빌드...")
+        # step8에서 이미 렌더된 이미지 재사용 (동일 PDF, 캐시 반영 위해 재호출)
+        pdf_images = render_pdf_pages_base64(
+            pdfs, slides_data.get("sources", []), log_callback=log_callback,
+        )
+        html_str = build_compact_html(
+            slides_data=slides_data,
+            compact_pages=compact_pages,
+            compact_glossary=compact_glossary,
+            compact_summary=compact_summary,
+            pdf_images=pdf_images,
+            run_id=run_id,
+        )
+        return html_str.encode("utf-8")
+
+    compact_html_bytes = cache.get_or_compute_bytes(
+        "step12_compact.html", _run_compact_html,
+    )
+    _emit(
+        log_callback,
+        f"[step12] 완료 — compact.html {len(compact_html_bytes)} bytes",
+    )
+
     return {
         "note.md": final_bytes,
         "note.json": note_json_bytes,
         "note.html": note_html_bytes,
+        "compact.html": compact_html_bytes,
     }

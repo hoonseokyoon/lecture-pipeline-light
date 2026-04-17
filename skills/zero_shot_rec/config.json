@@ -1,0 +1,32 @@
+{
+    "backend": "gemini",
+    "model": "gpt-5.4",
+    "gemini_model": "gemma-4-31b-it",
+    "gemini_rpm": 10,
+    "timeout": 600,
+    "output_dir": "zero_shot_rec",
+    "batch": true,
+    "ask_conditioning": true,
+    "stage0_reasoning_effort": "high",
+    "stage1_reasoning_effort": "high",
+    "stage2_reasoning_effort": "medium",
+    "stage12_reasoning_effort": "medium",
+    "stage0_vote_calls": 3,
+    "enable_refinement": false,
+    "max_iterations": 3,
+    "convergence_iou": 0.95,
+    "sanity_iou": 0.2,
+    "global_dot_grid": [6, 6],
+    "edge_dot_grid": [5, 8],
+    "edge_roi_margin": 0.35,
+    "edge_roi_biased_out": 0.60,
+    "edge_roi_biased_in": 0.20,
+    "edge_roi_lateral": 0.20,
+    "edge_min_roi_px": 400,
+    "stage0_candidates": 3,
+    "max_image_side": 1600,
+    "output_rename": {
+        "result.json": "{stem}-rec.json",
+        "annotated.png": "{stem}-rec.png"
+    }
+}

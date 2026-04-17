@@ -1,0 +1,14 @@
+zero_shot_rec은 composite skill입니다. 실제 로직은 `_lib/pipeline.py`의 run_rec
+에서 stage별로 run_codex_task를 호출하며, 본 prompt.txt는 직접 사용되지 않습니다
+(codex_runner.run_skill은 skill.run이 정의되어 있으면 Codex 직접 호출 경로를
+건너뛰고 run_rec에게 위임합니다 — codex_runner.py:1011-1017 참조).
+
+기능 요약:
+- 입력: PNG/JPG 이미지 1개 + conditioning(자연어 referring expression) 텍스트.
+- 출력: outputs/result.json (최종 박스 + 메타), outputs/annotated.png (빨간 박스 오버레이).
+- 알고리즘: 4-stage iterative refinement (init → containment → 4-edge parallel
+  refinement → convergence + sanity guard). 좌표는 정규화 [0, 1000]. 점 매트릭스
+  (Scaffold-style)를 visual prompt로 사용.
+
+conditioning은 GUI의 ConditioningDialog에서 입력하거나, input paths에
+conditioning_<id>.txt (JSON {"text": "..."}) 형태로 전달.

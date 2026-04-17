@@ -1,0 +1,16 @@
+exam_problem_detect는 composite skill입니다. 실제 로직은 `_lib/pipeline.py`의
+run_exam_detect에서 페이지별로 multi-box LLM 호출을 반복하며, 본 prompt.txt는
+직접 사용되지 않습니다 (codex_runner.run_skill은 skill.run이 정의되어 있으면
+Codex 직접 호출 경로를 건너뛰고 run_exam_detect에 위임합니다 —
+codex_runner.py:1011-1017).
+
+기능 요약:
+- 입력: PDF 1개 또는 PNG/JPG 이미지 1개 이상.
+- 출력:
+  - outputs/pages/page_NNN.png — 페이지별 annotated 이미지 (빨간 박스 + "p{page}-q{n}" 라벨)
+  - outputs/problems.json — 문제 리스트 (id, page, bbox, cluster_id 등)
+  - outputs/clusters.json — cluster 상세 (detection 집합, 3-후보, pick 결과)
+  - outputs/bridge_boxes.json — 2+ cluster에 걸친 span 박스들
+- 알고리즘: 페이지당 multi-box LLM call 3회+ 반복 → greedy single-linkage IoU
+  clustering (누적) → 안정화 시 종료 → cluster별 percentile 3-후보 산출 →
+  LLM이 best 대표 선출 → 결정론적 번호(p{page}-q{n}) 부여 → 렌더링.

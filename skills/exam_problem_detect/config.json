@@ -1,0 +1,28 @@
+{
+    "backend": "gemini",
+    "gemini_model": "gemma-4-31b-it",
+    "gemini_rpm": 10,
+    "model": "gpt-5.4",
+    "timeout": 300,
+    "output_dir": "exam_problem_detect",
+    "batch": true,
+
+    "max_image_side": 1600,
+    "render_dpi": 200,
+
+    "iou_threshold": 0.5,
+    "min_rounds": 3,
+    "max_rounds": 12,
+    "stable_rounds": 2,
+
+    "page_parallel": 4,
+    "pick_representative": true,
+
+    "stage0_reasoning_effort": "medium",
+
+    "output_rename": {
+        "problems.json": "{stem}-problems.json",
+        "clusters.json": "{stem}-clusters.json",
+        "bridge_boxes.json": "{stem}-bridges.json"
+    }
+}
