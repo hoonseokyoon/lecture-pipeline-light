@@ -24,12 +24,18 @@ from __future__ import annotations
 
 import io
 import json
+import random
+import time
 from pathlib import Path
 from typing import Callable
 
 from PIL import Image
 
-from codex_runner import CodexRunError, current_cancel_event
+from codex_runner import (
+    CodexRunError,
+    ContextThreadPoolExecutor,
+    current_cancel_event,
+)
 
 from _lib import image_utils as iu
 from _lib.gemini_backend import run_gemini_task
@@ -642,9 +648,22 @@ def review_with_annotations(
         if changed_ids:
             _emit(log, f"[review2] 재annotate {len(changed_ids)}개: {changed_ids}")
             id_set = set(changed_ids)
-            for obj in objects:
-                if obj.get("id") in id_set:
-                    annotate_fn(obj, objects)
+            targets = [o for o in objects if o.get("id") in id_set]
+            parallel = max(1, int(cfg.get("annotate_parallel", 1)))
+            jitter_s = float(cfg.get("annotate_jitter_s", 0.5))
+
+            def _one(target):
+                if parallel > 1 and jitter_s > 0:
+                    time.sleep(random.uniform(0, jitter_s))
+                annotate_fn(target, objects)
+
+            if parallel > 1 and len(targets) > 1:
+                with ContextThreadPoolExecutor(max_workers=parallel) as pool:
+                    for fut in [pool.submit(_one, t) for t in targets]:
+                        fut.result()
+            else:
+                for t_obj in targets:
+                    _one(t_obj)
 
         # 중간 저장
         annotated = iu.draw_annotated(page_img, objects)

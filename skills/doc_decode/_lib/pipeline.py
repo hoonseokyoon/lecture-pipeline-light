@@ -252,6 +252,8 @@ _RUN_ID_CFG_KEYS = (
     "overlap_warn_px",
     "review_phase2_min_rounds",
     "review_phase2_max_rounds",
+    "annotate_parallel",
+    "annotate_jitter_s",
 )
 
 

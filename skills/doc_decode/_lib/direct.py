@@ -18,13 +18,20 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 from PIL import Image
 
-from codex_runner import CodexRunError, current_cancel_event
+from codex_runner import (
+    CodexRunError,
+    ContextThreadPoolExecutor,
+    current_cancel_event,
+)
 
 from _lib import image_utils as iu
 from _lib.gemini_backend import run_gemini_task, set_rpm
@@ -509,26 +516,49 @@ def process_page_direct(
     # ── Phase 2: annotate (bbox 확정 후) ──
     _raise_if_cancelled()
     crop_padding = int(cfg.get("crop_padding_px", 0) or 0)
+    parallel = max(1, int(cfg.get("annotate_parallel", 1)))
+    jitter_s = float(cfg.get("annotate_jitter_s", 0.5))
     pending = [o for o in objects if not o.get("annotation")]
     _emit(
         log,
         f"[page {page_idx}] bbox 확정 — annotate {len(pending)}개 "
-        f"(crop_padding={crop_padding}px)",
+        f"(parallel={parallel}, crop_padding={crop_padding}px, "
+        f"jitter≤{jitter_s}s)",
     )
-    for i, obj in enumerate(pending, start=1):
+
+    state_lock = threading.Lock()
+    done_count = [0]
+
+    def _one(obj):
         _raise_if_cancelled()
+        # 병렬 호출이 동시에 Gemini 에 쏟아지지 않도록 0~jitter_s 랜덤 지연.
+        if parallel > 1 and jitter_s > 0:
+            time.sleep(random.uniform(0, jitter_s))
         _crop_and_annotate(
             obj, page_img, page_ckpt,
             max_attempts=max_attempts, model=model, log=log,
             crop_padding_px=crop_padding,
         )
-        state["objects"] = objects
-        state_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        if i % 5 == 0 or i == len(pending):
-            _emit(log, f"[page {page_idx}] annotate 진행 {i}/{len(pending)}")
+        with state_lock:
+            state["objects"] = objects
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            done_count[0] += 1
+            n = done_count[0]
+        if n % 5 == 0 or n == len(pending):
+            _emit(log, f"[page {page_idx}] annotate 진행 {n}/{len(pending)}")
+
+    if parallel > 1 and len(pending) > 1:
+        with ContextThreadPoolExecutor(max_workers=parallel) as pool:
+            futs = [pool.submit(_one, o) for o in pending]
+            for f in futs:
+                # 결과 회수 — 예외가 있으면 여기서 raise (cancel 포함)
+                f.result()
+    else:
+        for obj in pending:
+            _one(obj)
 
     # Phase 2 끝 — 중간 annotated.png
     annotated = iu.draw_annotated(page_img, objects)

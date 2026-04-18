@@ -130,9 +130,13 @@ def get_client() -> genai.Client:
     global _client
     if _client is not None:
         return _client
-    api_key = os.environ.get("GEMINI_API_KEY")
+    # doc_decode 는 on-demand 유료 키 우선, 없으면 표준 키로 fallback.
+    api_key = (
+        os.environ.get("GEMINI_API_KEY_ON_DEMAND")
+        or os.environ.get("GEMINI_API_KEY")
+    )
     if not api_key:
-        raise GeminiError("GEMINI_API_KEY 미설정")
+        raise GeminiError("GEMINI_API_KEY_ON_DEMAND 또는 GEMINI_API_KEY 미설정")
     _client = genai.Client(api_key=api_key)
     return _client
 

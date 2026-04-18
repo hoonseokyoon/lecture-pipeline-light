@@ -6,8 +6,10 @@
   "output_dir": "doc_decode",
   "batch": false,
 
-  "gemini_model": "gemma-4-31b-it",
-  "gemini_rpm": 10,
+  "gemini_model": "gemini-flash-latest",
+  "gemini_rpm": 30,
+  "annotate_parallel": 6,
+  "annotate_jitter_s": 0.5,
 
   "render_dpi": 200,
   "max_image_side": 2000,

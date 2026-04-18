@@ -31,10 +31,16 @@ def _get_client() -> genai.Client:
         return _client
     with _client_lock:
         if _client is None:
-            api_key = os.environ.get("GEMINI_API_KEY")
+            # doc_decode 는 on-demand 유료 키를 우선 사용 (이미지 분량이 많아
+            # 다른 스킬과 쿼터를 분리). 미설정이면 표준 GEMINI_API_KEY 로 fallback.
+            api_key = (
+                os.environ.get("GEMINI_API_KEY_ON_DEMAND")
+                or os.environ.get("GEMINI_API_KEY")
+            )
             if not api_key:
                 raise CodexRunError(
-                    "GEMINI_API_KEY 미설정. .env 파일 확인."
+                    "GEMINI_API_KEY_ON_DEMAND 또는 GEMINI_API_KEY 미설정. "
+                    ".env 파일 확인."
                 )
             # 네트워크 hang 방지. google-genai 의 HttpOptions.timeout 은
             # 밀리초 단위. SDK 버전에 따라 필드명이 달라질 수 있으므로 실패 시
@@ -214,6 +220,21 @@ def run_gemini_task(
         raise CodexRunError(
             f"Gemini 호출 실패 ({model}, {max_retries + 1}회 시도): {last_exc}"
         ) from last_exc
+
+    # 토큰 사용량 로그 (usage_metadata 이 SDK 버전에 따라 다른 필드 이름 쓸 수 있음)
+    try:
+        um = getattr(resp, "usage_metadata", None)
+        if um is not None:
+            pt = getattr(um, "prompt_token_count", None)
+            ct = getattr(um, "candidates_token_count", None)
+            tt = getattr(um, "total_token_count", None)
+            if any(v is not None for v in (pt, ct, tt)):
+                import logging as _logging
+                _logging.getLogger("lecture_pipeline.doc_decode.tokens").info(
+                    f"GEMINI_USAGE model={model} prompt={pt} output={ct} total={tt}"
+                )
+    except Exception:
+        pass
 
     text = (resp.text or "").strip()
     if not text:
