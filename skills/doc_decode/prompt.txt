@@ -1,0 +1,26 @@
+doc_decode 는 composite skill 입니다. 실제 로직은 `_lib/pipeline.py` 의
+`run_doc_decode` 에 있으며, 본 prompt.txt 는 codex 에 전달되지 않습니다.
+(codex_runner.run_skill 은 skill.run 이 있으면 Codex 직접 호출을 건너뛰고
+run_doc_decode 에 위임합니다.)
+
+Per-page Codex agent 에게 주어지는 프롬프트는 `_lib/pipeline.py` 의
+`_build_page_agent_prompt` 에서 동적으로 생성됩니다.
+
+기능 요약:
+- 입력: PDF 1개 이상. 여러 개는 파일별로 병렬 처리.
+- 파이프라인 (PDF 1개당):
+  1. Profile: 샘플 페이지 3장을 Gemini 에 보내 문서 성격 자연어 메모 생성.
+  2. 페이지 루프 (순차 또는 병렬): 각 페이지마다
+     Codex agent 를 호출하고 detect/annotate 두 도구를 줌.
+     agent 는 scripts/detect.py / scripts/annotate.py 를 반복 호출하며
+     objects.json 을 완성.
+  3. Assemble: 모든 페이지의 objects.json 을 deterministic 하게 합쳐
+     doc.md 생성.
+- 출력: doc.md, structure.json, assets/ (pages, crops, renders)
+
+Tools (Codex agent 가 사용):
+- scripts/detect.py: Gemini vision 으로 한 호출에 여러 bbox 를 동시에 감지 (증분, IoU 중복 제외)
+- scripts/annotate.py: 객체별 annotation + 렌더링 검증 loop (최대 4회)
+
+Gemini (google-genai) 는 detect/annotate 내부에서 API 로 호출되며,
+Codex agent 는 결과만 받아서 추가 조치를 결정합니다.

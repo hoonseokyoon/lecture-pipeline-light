@@ -149,6 +149,15 @@ class PrioritySemaphore:
             else:
                 self._available += 1
 
+    def stats(self) -> tuple[int, int, int]:
+        """(in_flight, capacity, waiters) 스냅샷. GUI status bar 용."""
+        with self._lock:
+            return (
+                self._capacity - self._available,
+                self._capacity,
+                len(self._waiters),
+            )
+
     def __enter__(self):
         self.acquire()
         return self
@@ -531,6 +540,26 @@ class CodexRunner:
         """Codex 호출 간 최소 간격(초) 변경."""
         self.stagger_interval = max(0.0, seconds)
 
+    def stats(self) -> dict[str, int]:
+        """런타임 가동 스냅샷 (GUI status bar 용).
+
+        - ``active_procs``: 현재 살아있는 subprocess 수 (Codex + Goose 공유).
+        - ``in_flight`` / ``capacity`` / ``waiters``: semaphore 점유/한도/대기 수.
+          ``active_procs`` 와 ``in_flight`` 는 스태거 구간 등으로 순간적으로
+          다를 수 있지만 대체로 같은 방향이다.
+        """
+        with self._semaphore_lock:
+            sem = self.semaphore
+        in_flight, capacity, waiters = sem.stats()
+        with self._proc_lock:
+            active = len(self._active_procs)
+        return {
+            "active_procs": active,
+            "in_flight": in_flight,
+            "capacity": capacity,
+            "waiters": waiters,
+        }
+
     def _stagger_wait(self) -> None:
         """다음 허용 시점까지 대기한 뒤 자신의 슬롯을 예약."""
         if self.stagger_interval <= 0:
@@ -744,6 +773,7 @@ class CodexRunner:
         scripts_dir: str | Path | None = None,
         scripts_ignore: tuple[str, ...] = (),
         expected_outputs: list[str] | None = None,
+        allow_extra_outputs: bool = False,
         output_schema: dict | None = None,
         model: str = DEFAULT_MODEL,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
@@ -755,6 +785,7 @@ class CodexRunner:
         claude_model: str = DEFAULT_CLAUDE_MODEL,
         cancel_event: threading.Event | None = None,
         venv_bin: Path | None = None,
+        network_access: bool = False,
     ) -> dict[str, bytes]:
         """Codex CLI로 prompt + inputs -> outputs 작업을 실행한다.
 
@@ -771,6 +802,10 @@ class CodexRunner:
             expected_outputs: 엄격 모드에서 반드시 있어야 하는 출력 파일명 리스트.
                 `None`이면 느슨 모드 (outputs/에 생긴 모든 파일을 그대로 반환).
                 빈 리스트는 허용되지 않는다 (느슨 모드를 원하면 `None` 사용).
+            allow_extra_outputs: 엄격 모드일 때 `expected_outputs` 외 파일도
+                함께 반환할지. True 면 와일드카드 출력(예: crops/*.png)을 쓰는
+                composite skill 에 적합. False(기본)는 expected 만 반환해 노이즈
+                제거.
             output_schema: JSON schema(dict). None이 아니면 workdir에 `_schema.json`
                 파일로 저장하고 `codex exec --output-schema _schema.json` 플래그를
                 추가해 LLM의 최종 응답을 schema에 맞게 강제.
@@ -913,6 +948,12 @@ class CodexRunner:
                 if service_tier and service_tier != "default":
                     argv.extend(["-c", f"service_tier={service_tier}"])
                 argv.append("--full-auto")  # 샌드박스 유지
+                if network_access:
+                    # workspace-write 샌드박스의 기본은 네트워크 차단. 스킬이
+                    # 외부 API (예: Gemini) 를 호출해야 하면 이 플래그를 켜야 함.
+                    argv.extend([
+                        "-c", "sandbox_workspace_write.network_access=true",
+                    ])
                 argv.extend(["-o", last_msg_file])
                 if output_schema is not None:
                     argv.extend(["--output-schema", "_schema.json"])
@@ -1010,6 +1051,8 @@ class CodexRunner:
                     if diag_parts:
                         msg += "\n---\n" + "\n---\n".join(diag_parts)
                     raise CodexRunError(msg)
+                if allow_extra_outputs:
+                    return collected
                 return {n: collected[n] for n in expected_outputs}
 
             if not collected:
@@ -1374,3 +1417,7 @@ def run_codex_task(*args, **kwargs) -> dict[str, bytes]:
 
 def run_skill(*args, **kwargs) -> dict[str, bytes]:
     return _default.run_skill(*args, **kwargs)
+
+
+def stats() -> dict[str, int]:
+    return _default.stats()

@@ -14,7 +14,7 @@ from typing import Callable
 
 from codex_runner import CodexRunError, run_codex_task
 
-from _lib.polish import _compute_batches
+from _lib.polish import _compute_batches, _purge_failed_worker_markers
 
 
 def _emit(log_callback: Callable[[str], None] | None, msg: str) -> None:
@@ -160,6 +160,9 @@ def polish_compact_pages(
     num_pages = len(sorted_idxs)
     polish_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # 과거 버그 버전의 'failed' marker / 원본-as-polished 캐시 정리 → 재시도 유도.
+    _purge_failed_worker_markers(polish_cache_dir, log_callback, "step5c")
+
     # 전체 캐시 히트
     cached_all = True
     for idx in sorted_idxs:
@@ -257,19 +260,14 @@ def polish_compact_pages(
                 timeout=timeout,
             )
         except CodexRunError as exc:
+            # 실패 시 cache 에 원본을 쓰지 않고, marker 도 남기지 않는다.
+            # 이전 worker 들의 cache 는 유지되므로 재실행 시 이 worker 부터 재시도.
             _emit(
                 log_callback,
-                f"[step5c] worker {worker_num} 실패, 원본 유지: {exc}",
+                f"[step5c] worker {worker_num} 실패 — pipeline 중단 "
+                f"(pages {first_idx}-{last_idx}): {exc}",
             )
-            for idx in batch:
-                if idx not in polished_narratives:
-                    polished_narratives[idx] = narratives.get(idx, "")
-                    _save_compact_page(
-                        polish_cache_dir, idx, compact_pages[idx],
-                        polished_narratives[idx],
-                    )
-            marker.write_text(f"failed — pages {first_idx}-{last_idx}")
-            continue
+            raise
 
         changed = 0
         missing = 0

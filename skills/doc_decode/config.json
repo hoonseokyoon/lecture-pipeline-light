@@ -1,0 +1,33 @@
+{
+  "backend": "codex",
+  "model": "gpt-5.4",
+  "reasoning_effort": "medium",
+  "timeout": 1200,
+  "output_dir": "doc_decode",
+  "batch": false,
+
+  "gemini_model": "gemma-4-31b-it",
+  "gemini_rpm": 10,
+
+  "render_dpi": 200,
+  "max_image_side": 2000,
+
+  "iou_threshold": 0.5,
+
+  "crop_padding_px": 8,
+
+  "review_max_rounds": 2,
+  "review_actions_per_round": 5,
+  "overlap_warn_px": 15,
+  "review_phase2_min_rounds": 1,
+  "review_phase2_max_rounds": 2,
+
+  "agent_turns_per_page": 10,
+  "annotate_max_attempts": 4,
+
+  "profile_sample_pages": 3,
+
+  "output_rename": {
+    "doc.md": "{stem}-doc.md"
+  }
+}

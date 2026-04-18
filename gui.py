@@ -211,6 +211,10 @@ class App:
         self.ws_label = ttk.Label(top, text="(no workspace)", foreground="#666")
         self.ws_label.pack(side="left", padx=10)
 
+        # Status bar 를 `top` 다음에 side=bottom 으로 먼저 확보해서 최하단 고정.
+        # 이후 pack 되는 mid/queue/log 는 top ~ status 사이 cavity 를 채운다.
+        self._build_status_bar()
+
         mid = ttk.Frame(self.root)
         mid.pack(fill="both", expand=True, padx=10, pady=4)
 
@@ -271,25 +275,13 @@ class App:
             right, text="Skills (파일 선택 후 클릭):"
         ).pack(anchor="w", pady=(4, 2))
 
-        self.skill_btns: list[ttk.Button] = []
-        for skill_dir in self._discover_skills():
-            btn = ttk.Button(
-                right,
-                text=skill_dir.name,
-                command=lambda s=skill_dir: self.on_skill(s),
-                state="disabled",
-            )
-            btn.pack(fill="x", pady=2)
-            self.skill_btns.append(btn)
-
-        if not self.skill_btns:
-            ttk.Label(
-                right, text="(no skills found)", foreground="#999"
-            ).pack(pady=4)
-
+        # Refresh files 를 먼저 side=bottom 으로 확보해서 하단 고정.
+        # 그 다음 skills 스크롤 영역이 중간 cavity 를 채운다.
         ttk.Button(
             right, text="Refresh files", command=self._refresh_tree
-        ).pack(fill="x", pady=(12, 0))
+        ).pack(side="bottom", fill="x", pady=(8, 0))
+
+        self._build_skills_scroller(right)
 
         # ── Queue 패널 (skill 예약) ──
         queue_frame = ttk.LabelFrame(
@@ -339,6 +331,138 @@ class App:
             self.root, height=10, state="disabled", wrap="word"
         )
         self.log.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+
+    def _build_skills_scroller(self, parent: ttk.Frame) -> None:
+        """Skills 버튼 목록을 Canvas 기반 스크롤 영역에 배치.
+
+        고정폭 `right` 패널 안에서 버튼이 창 높이를 넘을 때 세로 스크롤을
+        제공한다. `parent.pack_propagate(False)` 전제 하에 작동 — 캔버스는
+        남은 수직 cavity 를 전부 채운다.
+        """
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill="both", expand=True, pady=(2, 0))
+
+        canvas = tk.Canvas(wrap, highlightthickness=0, borderwidth=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event: object) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:
+            canvas.itemconfigure(inner_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Windows 휠 — Canvas 위에 커서가 있을 때만 바인딩해서 로그창 스크롤과
+        # 충돌하지 않게 한다.
+        def _on_mousewheel(event: tk.Event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind(
+            "<Enter>",
+            lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel),
+        )
+        canvas.bind(
+            "<Leave>",
+            lambda _e: canvas.unbind_all("<MouseWheel>"),
+        )
+
+        self.skill_btns: list[ttk.Button] = []
+        for skill_dir in self._discover_skills():
+            btn = ttk.Button(
+                inner,
+                text=skill_dir.name,
+                command=lambda s=skill_dir: self.on_skill(s),
+                state="disabled",
+            )
+            btn.pack(fill="x", pady=2)
+            self.skill_btns.append(btn)
+
+        if not self.skill_btns:
+            ttk.Label(
+                inner, text="(no skills found)", foreground="#999"
+            ).pack(pady=4)
+
+    def _build_status_bar(self) -> None:
+        """하단 성능 표시 바.
+
+        - Agent worker 가동률: Codex + Goose subprocess 동시 실행 수 / 한도
+          (progressbar + 숫자). Goose 도 codex_runner 의 semaphore 를 공유하므로
+          한 지표로 충분하다.
+        - Tasks: controller snapshot 의 running / pending 수.
+        - Waiting: semaphore 에 막혀 acquire 대기 중인 스레드 수 (composite skill
+          fan-out 시 증가).
+        """
+        bar = ttk.Frame(self.root, relief="sunken", padding=(8, 3))
+        bar.pack(side="bottom", fill="x")
+
+        ttk.Label(bar, text="Agent:").pack(side="left")
+        self.status_bar_pb = ttk.Progressbar(
+            bar,
+            mode="determinate",
+            length=140,
+            maximum=max(1, self.max_concurrent_codex),
+        )
+        self.status_bar_pb.pack(side="left", padx=(6, 6))
+        self.status_worker_label = ttk.Label(
+            bar, text=f"0/{self.max_concurrent_codex}", width=8
+        )
+        self.status_worker_label.pack(side="left")
+
+        ttk.Separator(bar, orient="vertical").pack(
+            side="left", fill="y", padx=10
+        )
+
+        self.status_task_label = ttk.Label(
+            bar, text="Tasks: 0 running, 0 pending"
+        )
+        self.status_task_label.pack(side="left")
+
+        ttk.Separator(bar, orient="vertical").pack(
+            side="left", fill="y", padx=10
+        )
+
+        self.status_wait_label = ttk.Label(
+            bar, text="Waiting: 0", foreground="#888"
+        )
+        self.status_wait_label.pack(side="left")
+
+        # 주기적 업데이트 시작.
+        self._poll_stats()
+
+    def _poll_stats(self) -> None:
+        try:
+            cs = codex_runner.stats()
+            running, pending = self.controller.snapshot()
+        except Exception:
+            self.root.after(1000, self._poll_stats)
+            return
+
+        capacity = max(1, int(cs.get("capacity", 1)))
+        in_flight = int(cs.get("in_flight", 0))
+        waiters = int(cs.get("waiters", 0))
+
+        # set_max_concurrent 로 한도가 바뀌었을 가능성 대비.
+        if int(self.status_bar_pb["maximum"]) != capacity:
+            self.status_bar_pb.configure(maximum=capacity)
+        self.status_bar_pb["value"] = in_flight
+        self.status_worker_label.config(text=f"{in_flight}/{capacity}")
+        self.status_task_label.config(
+            text=f"Tasks: {len(running)} running, {len(pending)} pending"
+        )
+        wait_fg = "#c62828" if waiters > 0 else "#888"
+        self.status_wait_label.config(
+            text=f"Waiting: {waiters}", foreground=wait_fg
+        )
+
+        self.root.after(500, self._poll_stats)
 
     def _discover_skills(self) -> list[Path]:
         if not SKILLS_DIR.is_dir():

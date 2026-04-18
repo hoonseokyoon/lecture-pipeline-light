@@ -30,6 +30,49 @@ def _emit(log_callback: Callable[[str], None] | None, msg: str) -> None:
         pass
 
 
+def _purge_failed_worker_markers(
+    cache_dir: Path,
+    log_callback: Callable[[str], None] | None,
+    step_tag: str,
+) -> None:
+    """과거 버그 버전이 남긴 'failed — ...' marker 들을 제거.
+
+    marker 파일명은 `_worker_NN_done`, 내용이 'failed' 로 시작하면 제거.
+    해당 범위(pages X-Y) 의 page_NNN.md 캐시도 함께 삭제해서 재시도를 유도한다.
+    """
+    import re
+    for marker in cache_dir.glob("_worker_*_done"):
+        try:
+            content = marker.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not content.lstrip().lower().startswith("failed"):
+            continue
+        m = re.search(r"pages\s+(\d+)\s*-\s*(\d+)", content)
+        purged_pages: list[int] = []
+        if m:
+            first, last = int(m.group(1)), int(m.group(2))
+            for idx in range(first, last + 1):
+                # .md 와 .json 양쪽 모두 대응 (step5b / step5c 공용)
+                for ext in ("md", "json"):
+                    p = cache_dir / f"page_{idx:03d}.{ext}"
+                    if p.exists():
+                        try:
+                            p.unlink()
+                            purged_pages.append(idx)
+                        except OSError:
+                            pass
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        _emit(
+            log_callback,
+            f"[{step_tag}] 과거 failed marker {marker.name} 정리 "
+            f"(재시도 대상 페이지 {sorted(set(purged_pages))})",
+        )
+
+
 def _compute_batches(
     sorted_idxs: list[int],
     batch_size: int,
@@ -225,6 +268,11 @@ def polish_pages(
     num_pages = len(sorted_idxs)
     polish_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # 과거 버그 버전에서 실패 시 marker 를 "failed — ..." 로 남기고 원본을
+    # page_NNN.md 로 저장했던 유물을 정리. 해당 worker 의 marker 와 그 범위의
+    # 페이지 캐시를 지워 재시도시킨다.
+    _purge_failed_worker_markers(polish_cache_dir, log_callback, "step5b")
+
     # 전체 캐시 히트 체크
     cached_all = True
     for idx in sorted_idxs:
@@ -316,18 +364,15 @@ def polish_pages(
                 timeout=timeout,
             )
         except CodexRunError as exc:
+            # 실패 시 cache 에 원본을 쓰지 않고, marker 도 남기지 않는다.
+            # 이전 worker 들의 cache 는 유지되므로 재실행 시 이 worker 부터 재시도.
+            # raise 로 즉시 중단해서 unpolished 데이터가 step5c 이후로 누수되는 것 차단.
             _emit(
                 log_callback,
-                f"[step5b] worker {worker_num} 실패, 원본 유지: {exc}",
+                f"[step5b] worker {worker_num} 실패 — pipeline 중단 "
+                f"(pages {first_idx}-{last_idx}): {exc}",
             )
-            for idx in batch:
-                if idx not in polished:
-                    polished[idx] = page_notes[idx]
-                    (polish_cache_dir / f"page_{idx:03d}.md").write_text(
-                        page_notes[idx], encoding="utf-8",
-                    )
-            marker.write_text(f"failed — pages {first_idx}-{last_idx}")
-            continue
+            raise
 
         # 결과 수집
         changed = 0

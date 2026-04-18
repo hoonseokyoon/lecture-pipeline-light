@@ -22,6 +22,9 @@ dist/
 # Runtime logs
 .logs/
 
+# doc_decode iteration outputs (local experiments)
+_iter/
+
 # Legacy standalone configs
 correct_config.json
 correct_prompt.txt
