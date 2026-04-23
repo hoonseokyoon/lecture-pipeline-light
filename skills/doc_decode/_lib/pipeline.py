@@ -467,6 +467,10 @@ def run_doc_decode(
     pdf_path = pdfs[0]
 
     cfg = load_skill(skill_dir).config
+    _emit(
+        log,
+        "[doc_decode] ⚠ DEPRECATED — `doc_to_md` (Mistral OCR) 사용 권장",
+    )
     _emit(log, f"[doc_decode] 시작: {pdf_path.name}")
 
     doc_md_bytes, structure_bytes, assets, diag = _process_pdf(

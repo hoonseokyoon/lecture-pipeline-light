@@ -1,3 +1,9 @@
+[DEPRECATED]
+이 스킬은 `doc_to_md` (Mistral OCR 기반 단일 호출) 로 대체되었습니다.
+`doc_to_md` 가 논문/컨퍼런스 자료의 수식(LaTeX)·표·레이아웃을 훨씬 단순한
+경로로 Markdown 으로 변환합니다. 기존 페이지별 Codex agent + detect/annotate
+파이프라인이 필요한 특수 케이스에만 남겨둠.
+
 doc_decode 는 composite skill 입니다. 실제 로직은 `_lib/pipeline.py` 의
 `run_doc_decode` 에 있으며, 본 prompt.txt 는 codex 에 전달되지 않습니다.
 (codex_runner.run_skill 은 skill.run 이 있으면 Codex 직접 호출을 건너뛰고

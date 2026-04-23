@@ -1,4 +1,7 @@
 {
+  "deprecated": true,
+  "deprecated_replaced_by": "doc_to_md",
+
   "backend": "codex",
   "model": "gpt-5.4",
   "reasoning_effort": "medium",
