@@ -1,0 +1,21 @@
+# 바이너리 힌트 (git 의 heuristic 보강)
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+
+# 텍스트 라인엔딩 (Windows/WSL/Unix 혼용 대비)
+*.md text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Markdown diff 가독성
+*.md diff=markdown

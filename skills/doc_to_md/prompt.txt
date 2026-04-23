@@ -1,0 +1,17 @@
+doc_to_md 는 composite skill 입니다. 실제 로직은 `_lib/mistral_ocr.py` 의
+`run_doc_to_md` 에 있으며, 본 prompt.txt 는 LLM 에 전달되지 않습니다.
+(codex_runner.run_skill 은 skill.run 이 있으면 Codex 직접 호출을 건너뛰고
+run_doc_to_md 에 위임합니다.)
+
+기능 요약:
+- 입력: PDF 1개 이상. 여러 개는 per-file 실행 (batch=false).
+- 파이프라인:
+  1. PDF 를 data URI (base64) 로 Mistral OCR API 에 직접 전달.
+     50MB 초과면 multipart 업로드 경로로 자동 전환.
+  2. 응답의 페이지별 markdown 을 그대로 연결해 doc.md 생성.
+  3. include_images=true 면 페이지 내 이미지(base64) 를 assets/ 로 추출하고
+     markdown 안의 `](img-id)` 링크를 상대경로로 rewrite.
+- 출력: doc.md, 선택적으로 {stem}-assets/<page>/<img-id>.{ext}
+
+환경변수:
+- MISTRAL_API_KEY : Mistral 플랫폼 발급 키 (console.mistral.ai)

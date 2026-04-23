@@ -1,0 +1,24 @@
+# 런타임·재생성 가능
+.litproj/state.sqlite
+.litproj/state.sqlite-journal
+.litproj/state.sqlite-wal
+.litproj/state.sqlite-shm
+.litproj/index/
+.litproj/halt
+.litproj/*.lock
+.litproj/current_session.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

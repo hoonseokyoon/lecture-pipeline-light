@@ -1,0 +1,13 @@
+{
+  "batch": false,
+  "output_dir": "agent-docs/summaries",
+
+  "gemini_model": "gemini-flash-latest",
+  "timeout": 180,
+  "max_input_chars": 180000,
+
+  "output_rename": {
+    "summary.md": "{stem}.md",
+    "summary.json": "{stem}.json"
+  }
+}

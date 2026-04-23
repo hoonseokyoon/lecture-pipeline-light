@@ -1,0 +1,41 @@
+lit_fetch 는 composite skill. `_lib/fetch.py` 의 `run_lit_fetch`.
+
+입력:
+- candidates.json (lit_search 출력) 또는 triaged.json (lit-triage 후)
+  triaged.json 이면 decision 이 "keep"/"maybe" 인 것만 다운로드.
+
+출력:
+- papers/<slug>.pdf         다운로드된 PDF (out_root 상대경로)
+- download_report.json      성공/실패 per-item (attempts 상세 포함)
+- needs_manual.json         다운로드 실패 목록 (사용자 수동 획득용)
+
+다운로드 전략 (2-phase):
+1. Phase 1 (requests, 병렬): arXiv direct / EuropePMC / candidate.pdf_url.
+   JS 필요 없는 대부분이 여기서 해결됨.
+2. Phase 2 (Playwright, 순차): PMC 원본 / Frontiers JS challenge / 그 외
+   browser 가 필요한 사이트. chromium 한 번 띄워서 여러 논문 순차 처리.
+
+config:
+- use_browser: true/false — phase 2 활성 여부 (기본 true)
+- browser_headless: true/false — GUI 표시 (디버깅 시 false)
+- browser_timeout_s: 개별 네비게이션·다운로드 타임아웃 (기본 90)
+- real_chrome_force_headful: true (기본) — use_real_chrome=true 일 때 headful
+  강제. Cloudflare (ACS 등) 가 headless fingerprint 에서 cf_clearance 쿠키를
+  거부하기 때문. false 로 바꾸면 headless 시도하되 Cloudflare-heavy publisher
+  에선 403 가능.
+
+환경변수 (전부 선택):
+- LIT_FETCH_STORAGE_STATE: 로그인 상태 JSON 파일 경로 (기관 SSO 쿠키 재사용용).
+  `playwright codegen --save-storage=state.json <login-url>` 로 1회 생성 후 경로 지정.
+- LIT_USE_REAL_CHROME=1: 번들 chromium 대신 로컬 설치된 Chrome 사용.
+  IP 기반 기관 인증 + 본인 Chrome 쿠키 상속으로 PNAS/Oxford/Springer 등 bot
+  detection 회피에 유리. 학교 와이파이에서 publisher 접근 시 필수.
+- LIT_CHROME_CHANNEL: "chrome" | "msedge" | "chrome-beta" (기본 "chrome")
+- LIT_CHROME_USER_DATA_DIR: Chrome 프로필 경로.
+  - 비우면 `~/.lit_chrome_profile` 자동 생성 (별도 프로필, 안전)
+  - 본인 기본 프로필 사용 시 (쿠키 상속 극대화):
+      Windows: `%LOCALAPPDATA%\Google\Chrome\User Data`
+      macOS:   `~/Library/Application Support/Google/Chrome`
+    **단 Chrome 종료 후 실행 필수** — lock 충돌 피하기 위함
+
+

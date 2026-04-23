@@ -1,0 +1,16 @@
+{
+  "batch": true,
+  "output_dir": "lit_search",
+
+  "sources": ["semantic_scholar", "pubmed", "arxiv"],
+  "max_per_source": 50,
+  "timeout": 120,
+  "request_delay_s": 1.0,
+
+  "output_rename": {
+    "candidates.json": "candidates.json",
+    "raw_semantic_scholar.json": "raw_semantic_scholar.json",
+    "raw_arxiv.xml": "raw_arxiv.xml",
+    "raw_pubmed.json": "raw_pubmed.json"
+  }
+}

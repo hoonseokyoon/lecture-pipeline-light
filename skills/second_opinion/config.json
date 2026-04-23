@@ -1,0 +1,14 @@
+{
+  "batch": false,
+  "output_dir": "agent-docs/second-opinions",
+
+  "backend": "codex",
+  "model": "gpt-5.4",
+  "reasoning_effort": "medium",
+  "service_tier": "fast",
+  "timeout": 900,
+
+  "output_rename": {
+    "critique.md": "{stem}-critique.md"
+  }
+}

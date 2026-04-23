@@ -1,0 +1,13 @@
+lit_summarize 는 composite skill. `_lib/summarize.py` 의 `run_lit_summarize`.
+
+입력:
+- doc.md (Mistral OCR 출력) 1편 per call (batch=false)
+
+맥락:
+- 환경변수 LIT_RFI_FILE 로 RFI 파일 경로 주입 가능 (없으면 상위 디렉토리 탐색)
+- 환경변수 LIT_PIR_FILE 로 PIR 파일 경로 (선택)
+
+출력:
+- summary.json — 구조화 필드 (problem, method, findings, limitations,
+  relevance_to_rfi, key_quotes 등)
+- summary.md   — 사람 읽기용 렌더링

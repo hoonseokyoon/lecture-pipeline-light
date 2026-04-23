@@ -5,3 +5,10 @@ PyMuPDF>=1.25.0
 google-genai>=1.0.0
 python-dotenv>=1.0.0
 Pillow>=10.0.0
+requests>=2.31.0
+# lit_fetch phase 2 (browser fallback) — PMC JS challenge, 기관 SSO 등
+# 초기 설치: pip install -r requirements.txt && playwright install chromium
+playwright>=1.40.0
+# Anti-bot evasion — window.chrome.loadTimes/csi, WebGL, plugins, permissions 등
+# hand-rolled patch 보다 포괄적. Cloudflare / 학술지 anti-bot 통과율 향상.
+playwright-stealth>=2.0.0

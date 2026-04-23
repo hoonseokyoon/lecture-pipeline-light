@@ -1,0 +1,31 @@
+lit_search 는 composite skill 입니다. 실제 로직은 `_lib/search.py` 의
+`run_lit_search` 에 있습니다.
+
+입력:
+- query.json (권장):
+    {
+      "query": "diffusion TTS artifact",
+      "max_per_source": 50,
+      "year_min": 2022,
+      "year_max": 2026,
+      "sources": ["semantic_scholar", "pubmed", "arxiv"]
+    }
+- 또는 requirements.md — 파일 본문을 그대로 query 로 사용 (길면 abstract-like 요약)
+
+출력:
+- candidates.json — dedup + 스코어링된 후보 리스트
+- raw_semantic_scholar.json — SS 원응답
+- raw_arxiv.xml — arXiv 원응답
+- raw_pubmed.json — PubMed 원응답 요약
+
+외부 호출:
+- Semantic Scholar Graph API (무료, 선택적 API key 는 SEMANTIC_SCHOLAR_API_KEY env)
+- arXiv Atom API (무료, rate limit 3s 권장)
+- PubMed E-utilities (esearch + efetch, 무료 3 req/s, PUBMED_API_KEY env 있으면 10 req/s;
+  NCBI 권장사항으로 NCBI_EMAIL env 설정 권장)
+
+Source 선택 가이드:
+- 생의학·약학·해부학·생리학 RFI → pubmed 우선, semantic_scholar 보조
+- CS/ML/NLP RFI → semantic_scholar + arxiv
+- 물리·수학 preprint → arxiv
+- 학제간 / 애매 → 셋 다

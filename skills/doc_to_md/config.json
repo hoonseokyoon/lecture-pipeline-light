@@ -1,0 +1,12 @@
+{
+  "batch": false,
+  "output_dir": "doc_to_md",
+
+  "mistral_model": "mistral-ocr-latest",
+  "include_images": true,
+  "timeout": 600,
+
+  "output_rename": {
+    "doc.md": "{stem}-doc.md"
+  }
+}
