@@ -1,0 +1,42 @@
+image_generation 은 composite skill 이다. 실제 로직은 `_lib/generate.py` 의
+`run_image_generation` 이 담당하며, 이 prompt.txt 는 LLM 에 전달되지 않는다.
+
+입력: `.json` 파일 하나. 스키마는 `_lib/schema.py:FigureSpec`.
+```json
+{
+  "hint": "편향-분산 trade-off 곡선",
+  "context": "x=복잡도, y=에러, Bias² 감소·Variance 증가·Total U자",
+  "style": "journal sans-serif",
+  "format": "png",      // "png" | "tex" (TikZ)
+  "mode": "auto",       // "script" | "model" | "auto"
+  "seed": 42
+}
+```
+
+산출 (format=png, script mode): fig.png + fig.source.py + meta.json
+산출 (format=png, model mode): fig.png + meta.json
+산출 (format=tex, script mode): fig.source.tex (+ bonus fig.png if rasterized)
+
+Routing:
+- "script": matplotlib (format=png) 또는 TikZ (format=tex) 코드를 Codex (gpt-5.4)
+  가 작성·실행. 학술 도식·그래프·차트·수학 시각화에 적합.
+- "model": Gemini 3.1 Flash Image (Nano Banana) 가 PNG 직접 생성. 사실적·
+  일러스트·예술적 이미지에 적합 (ML 핸드아웃에선 드물게 사용).
+- "auto": Gemini Flash Lite 라우터가 hint 를 보고 자동 결정.
+
+Caching: (hint + context + style + format + mode + seed) hash 로 16-char key.
+캐시 hit 시 Gemini/Codex 호출 없이 재사용. 재현성은 캐시가 담당.
+
+환경변수:
+- GEMINI_API_KEY_ON_DEMAND (우선) / GEMINI_API_KEY (fallback)
+
+config (config.json):
+- gemini_image_model: 기본 "gemini-3.1-flash-image-preview"
+- router_model: 기본 "gemini-flash-latest" (분류기)
+- max_retries_script: 기본 2 (Codex 코드 실행 실패 시 재시도)
+- script_timeout: 기본 180 초
+- enable_cache: 기본 true
+- rpm: 기본 0 (무제한)
+
+라이브러리 API: `_lib.generate.generate_figure(...)` — pick_figures_for_slide
+에서 호출.

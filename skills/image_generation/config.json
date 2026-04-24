@@ -1,0 +1,22 @@
+{
+  "batch": false,
+  "output_dir": "generated_figures",
+
+  "gemini_image_model": "gemini-3.1-flash-image-preview",
+  "router_model": "gemini-flash-latest",
+
+  "max_retries_script": 2,
+  "max_retries_model": 1,
+  "script_timeout": 180,
+  "model_timeout": 120,
+
+  "enable_cache": true,
+  "rpm": 0,
+
+  "output_rename": {
+    "fig.png": "{stem}.png",
+    "fig.source.py": "{stem}.py",
+    "fig.source.tex": "{stem}.tex",
+    "meta.json": "{stem}.meta.json"
+  }
+}
