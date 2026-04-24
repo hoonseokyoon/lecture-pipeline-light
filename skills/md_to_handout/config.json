@@ -1,0 +1,26 @@
+{
+  "batch": false,
+  "output_dir": "md_to_handout",
+
+  "model": "gemini-pro-latest",
+  "thinking_level": "high",
+  "temperature": 1.0,
+  "seed": 7,
+  "max_output_tokens": 32000,
+  "media_resolution": "media_resolution_high",
+  "timeout": 300,
+  "rpm": 0,
+
+  "include_figures": false,
+  "max_figures": 20,
+  "figure_max_dim": 1024,
+  "token_abort_threshold": 900000,
+  "emit_preview": true,
+
+  "target_minutes": 60,
+
+  "output_rename": {
+    "outline.json": "{stem}-outline.json",
+    "outline.preview.md": "{stem}-outline.preview.md"
+  }
+}
