@@ -1,0 +1,22 @@
+{
+  "batch": false,
+  "output_dir": "render_beamer",
+
+  "aspect_ratio": "16:9",
+  "hangul_font": "Malgun Gothic",
+  "emit_notes": true,
+
+  "latexmk_timeout": 180,
+  "max_repair_iterations": 3,
+  "max_frame_failures_before_skip": 2,
+
+  "codex_model": "gpt-5.4",
+  "codex_reasoning_effort": "medium",
+  "repair_timeout": 120,
+
+  "output_rename": {
+    "doc.tex": "{stem}.tex",
+    "doc.pdf": "{stem}.pdf",
+    "render-log.json": "{stem}.render-log.json"
+  }
+}

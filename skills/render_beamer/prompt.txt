@@ -1,0 +1,52 @@
+render_beamer 는 composite skill 이다. 실제 로직은 `_lib/render.py` 의
+`run_render_beamer` 가 담당하며, 이 prompt.txt 는 LLM 에 전달되지 않는다.
+
+입력: `<stem>-outline.with-figures.json` (pick_figures_for_slide 산출).
+
+처리 흐름:
+1. outline 파싱. workspace 는 outline 파일의 parent.parent 로 추정
+   (`<workspace>/pick_figures/*.json` 레이아웃 기본).
+2. 각 slide 의 figure_refs 를 workspace 기준 절대 경로로 해석.
+   - .png / .jpg / .jpeg / .webp / .pdf → `\includegraphics`
+   - .tex                               → `\input` 으로 inline (TikZ)
+   - 존재하지 않으면 placeholder 텍스트 ("figure 누락") 로 대체
+3. TikZ 파일 상단의 `% requires: \usetikzlibrary{...}` 주석 스캔하여
+   preamble 에 `\usetikzlibrary{...}` aggregate.
+4. layout 별 frame 템플릿으로 .tex 조립:
+   - bullets         : itemize + 선택적 equation
+   - figure_focus    : columns (bullets 절반 + figure 절반)
+   - equation_focus  : bullets + equation*
+   - title_only      : centered large text (speaker_hint)
+5. latexmk -xelatex (없으면 xelatex 2회) 로 컴파일.
+6. 실패 시 latexmk .log 파싱:
+   - `\begin{document}` 이전 에러 → preamble repair (iteration 0 에서 1회)
+   - frame 내부 에러 → 해당 frame 만 Codex sub-skill 로 최소 수정
+7. frame 당 N회 (기본 2) 실패 시 placeholder frame 으로 교체 (fail-soft).
+8. 최대 M iteration (기본 3) 후 종료.
+
+산출:
+- {stem}.tex              : 최종 LaTeX source (repair 후)
+- {stem}.pdf              : 컴파일 성공 시에만
+- {stem}.render-log.json  : RenderReport (repair_attempts, skipped_frames, missing_figures, engine, duration)
+
+config (config.json):
+- aspect_ratio             : "16:9" 기본
+- hangul_font              : xeCJK 로 사용할 CJK main font (기본 "NanumGothic")
+- emit_notes               : speaker_hint 를 \note{...} 로 emit (기본 true)
+- latexmk_timeout          : 컴파일 1회 타임아웃 초 (기본 180)
+- max_repair_iterations    : compile-repair 루프 최대 반복 (기본 3)
+- max_frame_failures_before_skip : frame 을 placeholder 로 교체하기까지의 실패 횟수 (기본 2)
+- codex_model              : repair 용 Codex 모델 (기본 "gpt-5.4")
+- codex_reasoning_effort   : repair reasoning_effort ("low"/"medium"/"high", 기본 "medium")
+- repair_timeout           : Codex repair 1회 타임아웃 초 (기본 120)
+
+전제 조건:
+- XeLaTeX (TeX Live / MiKTeX) + kotex 패키지 설치.
+- 시스템에 한글 폰트 (기본 NanumGothic) 설치. 없으면 preamble fallback 시도.
+- latexmk 는 있으면 쓰고 없으면 xelatex 직접 호출.
+- Codex repair 는 `codex_runner.run_codex_task` 전역 semaphore / cancel 위에서
+  동작.
+
+취소:
+- compile iteration / frame repair 호출 / 각 단계 진입 직전에
+  `current_cancel_event` 체크. GUI "현재 중단" 누르면 다음 체크포인트에서 중단.
