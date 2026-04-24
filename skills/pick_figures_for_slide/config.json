@@ -1,0 +1,22 @@
+{
+  "batch": false,
+  "output_dir": "pick_figures",
+
+  "confidence_threshold": 0.65,
+  "max_figures_per_slide": 2,
+  "top_k": 5,
+
+  "fallback_to_generation": true,
+  "generation_mode": "auto",
+  "default_generation_format": "png",
+  "generation_style": "academic ML lecture, journal sans-serif",
+
+  "embed_output_dim": 1536,
+  "force_preprocess_refresh": false,
+  "rpm": 0,
+
+  "output_rename": {
+    "outline.with-figures.json": "{stem}-outline.with-figures.json",
+    "pick_report.json": "{stem}-pick-report.json"
+  }
+}

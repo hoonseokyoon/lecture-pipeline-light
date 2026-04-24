@@ -1,0 +1,42 @@
+pick_figures_for_slide 는 composite skill 이다. 실제 로직은 `_lib/pick.py` 의
+`run_pick_figures` 가 담당하며, 이 prompt.txt 는 LLM 에 전달되지 않는다.
+
+입력: `<stem>-outline.json` (md_to_handout 산출물, 보통
+`<workspace>/md_to_handout/` 에 위치).
+
+처리 흐름:
+1. outline.source_stem 에서 원본 md / assets 디렉토리 추정.
+2. Preprocess (캐시 있으면 skip):
+   - Mistral MD 에서 figure caption regex 회수 → 없는 이미지만 Gemini Flash vision
+     으로 자동 캡션.
+   - [image, caption] interleaved 로 gemini-embedding-2 호출 → 1536-dim fused vector.
+   - `.captions.json` + `.embeddings.npz` + `.preprocess_meta.json` 으로 assets 디렉토리에 캐시.
+3. 각 slide 에 대해:
+   a. figure_hint 없으면 skip.
+   b. Tier 1 — figure_hint embed → cosine top-K (기본 5) → Gemini Flash 최종 선택
+      (confidence 포함). confidence >= threshold 면 slide.figure_refs 채움.
+   c. Tier 2 (fallback_to_generation=true 일 때) — image_generation 서브스킬을
+      subprocess 로 호출. 결과는 `<workspace>/generated_figures/slide_<N>/` 에 저장.
+
+산출:
+- outline.with-figures.json : figure_refs 채워진 outline (원본 덮어쓰지 않음)
+- pick_report.json          : slide 별 decision 기록 (tier / confidence / timing)
+
+환경변수:
+- GEMINI_API_KEY_ON_DEMAND (우선) / GEMINI_API_KEY
+
+config (config.json):
+- confidence_threshold: 기본 0.65 (Tier 1 채택 임계값)
+- max_figures_per_slide: 기본 2
+- top_k: 기본 5 (retrieval 후보 개수)
+- fallback_to_generation: 기본 true
+- generation_mode: 기본 "auto" (image_generation 의 auto router 사용)
+- default_generation_format: 기본 "png"
+- embed_output_dim: 기본 1536 (gemini-embedding-2 Matryoshka)
+- rpm: 기본 0
+
+참고:
+- 이미지 수가 적으면 (e.g. ≤30) top_k 가 전체와 같아져 retrieval 은 단순히
+  "전수 후보 전달" 과 동일. 수백 장 넘어가면 retrieval 이 토큰 절약에 유의미.
+- Tier 2 subprocess 는 각 slide 별 독립. codex_runner semaphore 는 Tier 2 가 내부에서
+  codex CLI 호출 시 전역 제어.
