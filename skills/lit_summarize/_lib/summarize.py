@@ -8,6 +8,13 @@
   "method": "...",
   "findings": ["...", ...],
   "limitations": ["...", ...],
+  "host": "...",
+  "assay_type": "...",
+  "readout": "...",
+  "library_size": "...",
+  "validation_type": "...",
+  "failure_modes": ["...", ...],
+  "evidence_grade": "full_text|abstract_only|weak|moderate|strong",
   "relevance_to_rfi": "...",
   "relevance_score": 0.0~1.0,
   "key_quotes": [{"text": "...", "reason": "..."}],
@@ -40,6 +47,13 @@ _JSON_INSTRUCTION = """출력은 반드시 아래 JSON schema 에 맞는 유효�
   "method": "핵심 방법론 (3~5문장, 수식/알고리즘 핵심 용어 포함)",
   "findings": ["주요 발견 1", "주요 발견 2", "..."],
   "limitations": ["저자가 명시한 한계 또는 평가자 관점의 한계"],
+  "host": "생물학 논문이면 host/organism/cell line, 아니면 빈 문자열",
+  "assay_type": "실험/평가 assay 유형, 없으면 빈 문자열",
+  "readout": "측정 readout/endpoint, 없으면 빈 문자열",
+  "library_size": "library/model/data 크기, 없으면 빈 문자열",
+  "validation_type": "in silico / in vitro / in vivo / benchmark / external validation 등",
+  "failure_modes": ["실패 양상, 부작용, 재현성 리스크"],
+  "evidence_grade": "strong|moderate|weak|abstract_only 중 하나",
   "relevance_to_rfi": "현재 RFI 질문에 어떻게 관련되는지 (3~5문장)",
   "relevance_score": 0.0,
   "key_quotes": [
@@ -59,6 +73,7 @@ key_quotes 는 최대 5개, 원문을 그대로 (번역하지 말 것).
 key_figures 는 본문 마크다운에서 `![](assets/...)` 형태로 나타나는 것 중 핵심
 2~4개만. ref 필드는 원문 그대로 — 경로 변형 금지 (리뷰 작성 시 상대경로 재계산).
 abstract_only 는 전체 본문이 아닌 초록만 보고 요약한 경우 true.
+abstract_only=true 인 경우 evidence_grade 는 반드시 "abstract_only" 또는 "weak".
 """
 
 
@@ -192,6 +207,14 @@ def _to_markdown(summary: dict, source_stem: str) -> str:
         f"_source: `{source_stem}.md` · generated: "
         f"{datetime.now(timezone.utc).isoformat()}_",
         "",
+        "## Evidence Metadata",
+        f"- Evidence grade: {summary.get('evidence_grade') or 'n/a'}",
+        f"- Host: {summary.get('host') or 'n/a'}",
+        f"- Assay type: {summary.get('assay_type') or 'n/a'}",
+        f"- Readout: {summary.get('readout') or 'n/a'}",
+        f"- Library size: {summary.get('library_size') or 'n/a'}",
+        f"- Validation type: {summary.get('validation_type') or 'n/a'}",
+        "",
         "## Problem",
         summary.get("problem", "").strip() or "_n/a_",
         "",
@@ -210,6 +233,12 @@ def _to_markdown(summary: dict, source_stem: str) -> str:
         lines.append(f"- {f}")
     if not summary.get("limitations"):
         lines.append("_n/a_")
+
+    failure_modes = summary.get("failure_modes") or []
+    if failure_modes:
+        lines += ["", "## Failure Modes"]
+        for f in failure_modes:
+            lines.append(f"- {f}")
 
     lines += [
         "",
@@ -351,8 +380,20 @@ def run_lit_summarize(
 
     # paper_id 기본값 = src 파일 stem
     summary.setdefault("paper_id", src.stem)
+    for key in (
+        "host",
+        "assay_type",
+        "readout",
+        "library_size",
+        "validation_type",
+    ):
+        summary.setdefault(key, "")
+    summary.setdefault("failure_modes", [])
+    summary.setdefault("evidence_grade", "moderate")
     if abstract_only:
         summary["abstract_only"] = True
+        if str(summary.get("evidence_grade", "")).lower() not in {"abstract_only", "weak"}:
+            summary["evidence_grade"] = "abstract_only"
 
     # 산출
     json_bytes = json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")

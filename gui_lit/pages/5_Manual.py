@@ -183,8 +183,24 @@ st.caption(
     "또는 (2) abstract-only 요약으로 진행 또는 (3) 제외."
 )
 
-# DB 기반 pending 을 우선 렌더 (triaged 된 것이라 우선순위 명확)
-for row in pending_db_rows[:50]:  # 일단 상위 50개만
+
+def _is_tier1(row: dict) -> bool:
+    text = " ".join(
+        str(row.get(k) or "")
+        for k in ("triage_reason", "notes", "decision", "status")
+    ).lower()
+    return (
+        row.get("status") == "failed"
+        or row.get("decision") == "keep"
+        or "must_fetch" in text
+        or "must fetch" in text
+        or "fulltext_priority" in text and "high" in text
+        or "core evidence" in text
+        or "핵심" in text
+    )
+
+
+def _render_pending_row(row: dict) -> None:
     pid = row.get("id", "?")
     title = row.get("title") or "(untitled)"
     with st.container(border=True):
@@ -296,6 +312,22 @@ for row in pending_db_rows[:50]:  # 일단 상위 50개만
                 st.rerun()
 
 
+tier1_rows = [r for r in pending_db_rows if _is_tier1(r)]
+tier2_rows = [r for r in pending_db_rows if not _is_tier1(r)]
+
+if tier1_rows:
+    st.markdown("### Tier 1 — 수동 확보 우선")
+    st.caption("must_fetch, keep, failed, 핵심 근거 후보입니다. 가능하면 PDF 본문을 확보하세요.")
+    for row in tier1_rows[:50]:
+        _render_pending_row(row)
+
+if tier2_rows:
+    st.markdown("### Tier 2 — abstract-only / 보조 후보")
+    st.caption("본문 확보가 어렵거나 보조 근거인 후보입니다. 필요 시 초록 기반 요약으로 진행합니다.")
+    for row in tier2_rows[:50]:
+        _render_pending_row(row)
+
+
 # ── needs_manual.json 전용 뷰 (DB 에 아직 ingest 안 된 것 포함) ──
 
 if needs_manual_items:
@@ -304,7 +336,10 @@ if needs_manual_items:
     with st.expander(f"{len(needs_manual_items)}개 항목 전체 보기", expanded=False):
         for it in needs_manual_items[:100]:
             st.markdown(f"**{it.get('title') or '(untitled)'}**")
-            st.caption(f"id: `{it.get('id')}` · reason: {it.get('reason')}")
+            st.caption(
+                f"id: `{it.get('id')}` · category: `{it.get('failure_category') or '-'}` "
+                f"· reason: {it.get('reason')}"
+            )
             urls = it.get("url_tried")
             if isinstance(urls, list):
                 for u in urls[:3]:

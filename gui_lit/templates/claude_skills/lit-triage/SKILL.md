@@ -26,8 +26,15 @@ description: Review the candidates.json produced by lit_search and classify each
 
 3. 판정 근거를 1줄로 첨부. 예:
    ```json
-   {"id": "...", "decision": "keep", "reason": "diffusion TTS artifact
-    analysis 의 정면 공략, 2024 ICASSP"}
+   {
+     "id": "...",
+     "decision": "keep",
+     "reason": "RFI 질문의 핵심 방법론/결과를 직접 제공",
+     "evidence_role": "core|background|method|counterexample|snowball",
+     "fulltext_priority": "high|medium|low",
+     "risk_of_bias": "low|medium|high|unknown",
+     "must_fetch": true
+   }
    ```
 
 4. 결과를 `.litproj/runs/<latest>/triaged.json` 으로 저장.
@@ -45,6 +52,9 @@ description: Review the candidates.json produced by lit_search and classify each
 - 인용수 0 이고 < 1년 된 논문 → maybe (신규일 수 있음)
 - 인용수 많고 방법 설명이 abstract 에 뚜렷 → keep
 - Survey/Review 류 논문은 snowball 시드로 쓸 수 있어 우선순위 up
+- 핵심 claim 을 지탱할 논문은 `must_fetch=true`, `fulltext_priority=high`.
+- abstract 만으로도 배경 설명에 충분한 후보는 `evidence_role=background`,
+  `must_fetch=false` 로 두고 review confidence 를 낮춘다.
 
 ## 주의
 

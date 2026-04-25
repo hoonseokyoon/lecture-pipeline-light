@@ -1,4 +1,4 @@
-"""Literature search across Semantic Scholar + arXiv + PubMed.
+"""Literature search across Semantic Scholar + arXiv + PubMed + EuropePMC.
 
 간단한 전략:
 1. query.json 또는 requirements.md 읽기 → query 문자열 확정
@@ -12,7 +12,8 @@ network_access 필요. harness venv 에 `requests` 가 있으므로 사용.
 Source 별 강점:
 - semantic_scholar: CS/ML 영역에서 강함. citation graph. API key 권장.
 - arxiv: 물리/수학/CS preprint. biology 는 q-bio 로 소수.
-- pubmed: 생물/의학 gold standard (3.5M+ citations). 무료, 무키 3 req/s.
+- pubmed: 생물/의학 gold standard. 무료, 무키 3 req/s.
+- europepmc: PMC/PMCID/PDF URL 확보에 강함. biomedical full-text seed.
 """
 
 from __future__ import annotations
@@ -45,11 +46,26 @@ logger = logging.getLogger("lecture_pipeline.lit_search")
 #
 # - SS: 공식 1 req/s. 보수적 0.9.
 # - PubMed: 무키 3 req/s 허용. 2.5 (PUBMED_API_KEY 있으면 추후 상향 검토).
+# - EuropePMC: polite 2 req/s.
 # - arXiv: 요청간 3s 권장. 0.33 req/s.
 _LIMITERS = {
     "semantic_scholar": CrossProcessRateLimiter(rps=0.9, name="semantic-scholar"),
     "pubmed": CrossProcessRateLimiter(rps=2.5, name="pubmed"),
+    "europepmc": CrossProcessRateLimiter(rps=2.0, name="europepmc"),
     "arxiv": CrossProcessRateLimiter(rps=0.33, name="arxiv"),
+}
+
+_DOMAIN_PROFILE_SOURCES = {
+    "biomed": ["pubmed", "semantic_scholar", "europepmc"],
+    "ml_cs": ["semantic_scholar", "arxiv"],
+    "physics": ["arxiv", "semantic_scholar"],
+    "mixed": ["semantic_scholar", "pubmed", "arxiv"],
+}
+
+_STOPWORDS = {
+    "and", "are", "for", "from", "how", "into", "its", "the", "their", "this",
+    "that", "with", "without", "using", "used", "uses", "use", "paper", "study",
+    "review", "survey", "model", "models", "foundation", "analysis",
 }
 
 
@@ -469,7 +485,7 @@ def _pubmed_article_to_candidate(article: ET.Element) -> dict | None:
     pdf_url = None
     if pmc_id:
         pid = pmc_id if pmc_id.startswith("PMC") else f"PMC{pmc_id}"
-        pdf_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pid}/pdf/"
+        pdf_url = f"https://europepmc.org/articles/{pid}?pdf=render"
 
     return {
         "id": f"pubmed-{pmid}",
@@ -502,6 +518,102 @@ def _extract_mixed_text(el: ET.Element) -> str:
     return "".join(parts)
 
 
+# ── EuropePMC ──
+
+
+_EUROPEPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+
+def _normalize_pmc_id(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    s = str(raw).strip()
+    m = re.match(r"(?i)^(PMC)?(\d+)$", s)
+    if not m:
+        return None
+    return f"PMC{m.group(2)}"
+
+
+def _europepmc_pdf_url(pmcid: str | None) -> str | None:
+    norm = _normalize_pmc_id(pmcid)
+    if not norm:
+        return None
+    return f"https://europepmc.org/articles/{norm}?pdf=render"
+
+
+def _fetch_europepmc(
+    query: str,
+    max_n: int,
+    year_min: int | None,
+    year_max: int | None,
+    timeout: int,
+) -> tuple[list[dict], dict]:
+    epmc_query = query
+    if year_min or year_max:
+        lo = year_min or 1800
+        hi = year_max or datetime.now(timezone.utc).year
+        epmc_query = f"({query}) AND FIRST_PDATE:[{lo}-01-01 TO {hi}-12-31]"
+    params = {
+        "query": epmc_query,
+        "format": "json",
+        "resultType": "core",
+        "pageSize": str(min(100, max_n)),
+    }
+    try:
+        resp = get_with_retry(
+            _EUROPEPMC_SEARCH,
+            params=params,
+            timeout=timeout,
+            rate_limiter=_get_limiter("europepmc"),
+            log_name="EuropePMC-search",
+        )
+    except HttpError as exc:
+        raise CodexRunError(f"EuropePMC 연결 반복 실패: {exc}") from exc
+    if resp.status_code >= 300:
+        raise CodexRunError(
+            f"EuropePMC 실패 ({resp.status_code}): {resp.text[:300]}"
+        )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise CodexRunError(f"EuropePMC JSON 파싱 실패: {exc}") from exc
+    items = ((data.get("resultList") or {}).get("result") or [])
+    return [_europepmc_to_candidate(it) for it in items], data
+
+
+def _europepmc_to_candidate(item: dict) -> dict:
+    pmid = item.get("pmid")
+    pmcid = _normalize_pmc_id(item.get("pmcid"))
+    doi = item.get("doi")
+    title = re.sub(r"\s+", " ", item.get("title") or "").strip()
+    authors_raw = item.get("authorString") or ""
+    authors = [a.strip() for a in authors_raw.split(",") if a.strip()]
+    year = None
+    y = item.get("pubYear") or ""
+    if str(y).isdigit():
+        year = int(y)
+    try:
+        cited_by = int(item.get("citedByCount")) if item.get("citedByCount") else None
+    except (TypeError, ValueError):
+        cited_by = None
+    stable = pmcid or pmid or doi or str(abs(hash(title)))
+    return {
+        "id": f"europepmc-{stable}",
+        "source": "europepmc",
+        "title": title,
+        "authors": authors,
+        "year": year,
+        "venue": item.get("journalTitle") or item.get("bookOrReportDetails") or "",
+        "abstract": re.sub(r"\s+", " ", item.get("abstractText") or "").strip(),
+        "doi": doi,
+        "arxiv_id": None,
+        "pmid": pmid,
+        "pmc_id": pmcid,
+        "pdf_url": _europepmc_pdf_url(pmcid),
+        "citation_count": cited_by,
+    }
+
+
 # ── Dedup + Score ──
 
 
@@ -523,7 +635,12 @@ def _dedup(candidates: list[dict]) -> list[dict]:
     seen_title: dict[str, int] = {}
     out: list[dict] = []
 
-    source_priority = {"pubmed": 3, "semantic_scholar": 2, "arxiv": 1}
+    source_priority = {
+        "pubmed": 4,
+        "europepmc": 3,
+        "semantic_scholar": 2,
+        "arxiv": 1,
+    }
 
     def _merge(dst: dict, src: dict) -> dict:
         merged = dict(dst)
@@ -601,6 +718,59 @@ def _score(candidate: dict, query_tokens: set[str]) -> float:
     return round(min(1.0, coverage + year_bonus + citation_bonus), 4)
 
 
+def sources_for_domain_profile(profile: str | None) -> list[str] | None:
+    if not profile:
+        return None
+    return _DOMAIN_PROFILE_SOURCES.get(str(profile).strip().lower())
+
+
+def _resolve_sources(spec: dict, cfg: dict) -> tuple[list[str], str | None]:
+    if spec.get("sources"):
+        raw = spec["sources"]
+        if isinstance(raw, str):
+            raw = [s.strip() for s in raw.split(",")]
+        return [str(s).strip() for s in raw if str(s).strip()], spec.get("domain_profile")
+    profile = spec.get("domain_profile") or cfg.get("domain_profile")
+    prof_sources = sources_for_domain_profile(profile)
+    if prof_sources:
+        return prof_sources, str(profile).strip().lower()
+    raw_cfg = cfg.get("sources", ["semantic_scholar", "arxiv"])
+    if isinstance(raw_cfg, str):
+        raw_cfg = [s.strip() for s in raw_cfg.split(",")]
+    return [str(s).strip() for s in raw_cfg if str(s).strip()], None
+
+
+def _sanity_query_tokens(query: str) -> set[str]:
+    return {t for t in _tokenize(query) if t not in _STOPWORDS}
+
+
+def _validate_sanity_gate(candidates: list[dict], query: str) -> None:
+    """저장 전 coarse relevance gate.
+
+    top 20 중 query signal token 이 제목/초록에 하나도 겹치지 않는 후보가
+    절반 이상이면 source/query 선택 실패로 간주한다. 이 단계는 LLM triage
+    이전의 값싼 guardrail 이므로 error 는 후보 파일 저장을 막는다.
+    """
+    top = candidates[:20]
+    if not top:
+        return
+    signal = _sanity_query_tokens(query)
+    if not signal:
+        return
+    low = 0
+    for c in top:
+        cand_tokens = _tokenize(
+            f"{c.get('title', '')} {c.get('abstract', '')} {c.get('venue', '')}"
+        )
+        if not (signal & cand_tokens):
+            low += 1
+    if low / len(top) >= 0.5:
+        raise CodexRunError(
+            "lit_search sanity gate 실패: top 후보의 절반 이상이 query/domain "
+            "token 과 겹치지 않습니다. query 또는 domain_profile 을 재작성하세요."
+        )
+
+
 # ── Entry ──
 
 
@@ -614,7 +784,7 @@ def run_lit_search(
     query = spec["query"]
     cfg = load_skill(skill_dir).config
 
-    sources = spec.get("sources") or cfg.get("sources", ["semantic_scholar", "arxiv"])
+    sources, domain_profile = _resolve_sources(spec, cfg)
     max_per_source = int(
         spec.get("max_per_source") or cfg.get("max_per_source", 50)
     )
@@ -623,7 +793,8 @@ def run_lit_search(
     timeout = int(cfg.get("timeout", 120))
     delay = float(cfg.get("request_delay_s", 1.0))
 
-    _emit(log, f"[lit_search] query='{query[:80]}' sources={sources}")
+    profile_msg = f" domain_profile={domain_profile}" if domain_profile else ""
+    _emit(log, f"[lit_search] query='{query[:80]}' sources={sources}{profile_msg}")
 
     collected: list[dict] = []
     outputs: dict[str, bytes] = {}
@@ -674,6 +845,21 @@ def run_lit_search(
             _emit(log, f"[lit_search] PubMed 결과 {len(items)}건")
             collected.extend(items)
 
+        elif src == "europepmc":
+            _emit(log, f"[lit_search] EuropePMC 호출 (max={max_per_source})")
+            try:
+                items, raw_epmc = _fetch_europepmc(
+                    query, max_per_source, year_min, year_max, timeout,
+                )
+            except CodexRunError as exc:
+                _emit(log, f"[lit_search] EuropePMC 실패 — 계속: {exc}")
+                continue
+            outputs["raw_europepmc.json"] = json.dumps(
+                raw_epmc, ensure_ascii=False, indent=2,
+            ).encode("utf-8")
+            _emit(log, f"[lit_search] EuropePMC 결과 {len(items)}건")
+            collected.extend(items)
+
         else:
             _emit(log, f"[lit_search] 미지원 source: {src} (skip)")
 
@@ -687,17 +873,22 @@ def run_lit_search(
     for c in deduped:
         c["score"] = _score(c, query_tokens)
     deduped.sort(key=lambda c: c.get("score", 0), reverse=True)
+    _validate_sanity_gate(deduped, query)
+    total_after = len(deduped)
 
     result = {
         "query": query,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sources": sources,
+        "domain_profile": domain_profile,
         "year_min": year_min,
         "year_max": year_max,
         "total_before_dedup": total,
-        "total_after_dedup": len(deduped),
+        "total_after_dedup": total_after,
         "candidates": deduped,
     }
+    if result["total_after_dedup"] != len(result["candidates"]):
+        raise CodexRunError("lit_search invariant 실패: total_after_dedup count mismatch")
     outputs["candidates.json"] = json.dumps(
         result, ensure_ascii=False, indent=2,
     ).encode("utf-8")

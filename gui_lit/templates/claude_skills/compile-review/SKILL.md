@@ -17,7 +17,9 @@ description: Synthesize per-paper summaries into a coherent literature review do
 
 ## 출력
 
-`agent-docs/reviews/rfi-<id>-review.md` — 섹션형 리뷰 (기본 5~10 페이지).
+- `agent-docs/reviews/rfi-<id>-claim-matrix.json` — 본문 작성 전 생성하는
+  주장-근거 매트릭스.
+- `agent-docs/reviews/rfi-<id>-review.md` — 섹션형 리뷰 (기본 5~10 페이지).
 
 ## 이미지 인라인 인용 규칙
 
@@ -36,16 +38,8 @@ description: Synthesize per-paper summaries into a coherent literature review do
 
 Journal 에도 embed 한 이미지 목록 기록:
 ```bash
-python -c "
-import json, datetime
-with open('.litproj/journal.jsonl','a',encoding='utf-8') as f:
-    f.write(json.dumps({
-        'ts': datetime.datetime.utcnow().isoformat()+'Z',
-        'actor':'head','kind':'review_images_embedded',
-        'rfi':'<id>','count':N,
-        'paths':['../../extracted/.../img-1.jpeg', ...]
-    }, ensure_ascii=False)+'\\n')
-"
+python -m gui_lit.ipc append-journal . \
+  --event-json '{"actor":"head","kind":"review_images_embedded","rfi":"<id>","count":"<N>","paths":["../../extracted/.../img-1.jpeg"]}'
 ```
 
 ## 구조 (기본 — config 로 조정 가능)
@@ -97,30 +91,61 @@ _작성: <ISO date> / 커밋: <git SHA>_
 2. 공통 주제 클러스터링 — 방법·데이터·결과 기준. LLM 능력 활용 (이미 풀
     컨텍스트 접근). 3~6 개 클러스터 추천.
 
-3. 각 섹션 작성 — 구체 근거(논문 번호) 와 함께. 추측·과장 금지.
+3. 본문을 쓰기 전에 claim matrix 를 먼저 작성:
+   ```json
+   {
+     "rfi": "<id>",
+     "claims": [
+       {
+         "claim": "핵심 주장",
+         "refs": ["paper_id_or_ref"],
+         "fulltext_refs": ["paper_id_or_ref"],
+         "abstract_only_refs": [],
+         "confidence": "high|medium|low",
+         "section": "Synthesis"
+       }
+     ]
+   }
+   ```
+   저장 위치: `agent-docs/reviews/rfi-<id>-claim-matrix.json`.
 
-4. 인용 형식 — `[N]` 본문, References 섹션에 대응. 인용 없는 주장 금지.
+4. claim matrix 를 근거로 각 섹션 작성 — 구체 근거(논문 번호) 와 함께.
+   추측·과장 금지. claim matrix 에 없는 핵심 주장은 본문에 넣지 말 것.
 
-5. 초안 완성 후 스스로 점검:
+5. 인용 형식 — `[N]` 본문, References 섹션에 대응. 인용 없는 주장 금지.
+   abstract-only 근거만 있는 claim 은 high confidence 금지.
+
+6. 초안 완성 후 스스로 점검:
    - RFI 의 모든 sub-question 이 답해졌는가?
    - 각 주장에 근거가 있는가?
    - 상반된 견해가 모두 소개됐는가?
 
-6. journal 기록 후 커밋:
+7. doctor 로 review lint 통과:
    ```bash
-   git add agent-docs/reviews/rfi-<id>-review.md .litproj/journal.jsonl
+   python -m gui_lit.doctor .
+   ```
+
+8. journal 기록 후 커밋:
+   ```bash
+   python -m gui_lit.ipc append-journal . \
+     --event-json '{"actor":"head","kind":"review_compiled","rfi":"<id>","papers_count":"<N>","clusters_count":"<K>"}'
+   git add agent-docs/reviews/rfi-<id>-review.md agent-docs/reviews/rfi-<id>-claim-matrix.json .litproj/journal.jsonl
    git commit -m "rfi-<id>: compile review — N papers, K clusters"
    ```
 
-7. **Second opinion 요청 (권장)**:
+9. **Second opinion 요청 (권장)**:
    ```bash
    python $LIT_HARNESS_ROOT/run_skill.py second_opinion \
        agent-docs/reviews/rfi-<id>-review.md \
+       REQUEST_FOR_INFORMATION.md \
+       agent-docs/reviews/rfi-<id>-claim-matrix.json \
+       .litproj/runs/<latest>/candidates.json \
+       .litproj/runs/<latest>/triaged.json \
        --out agent-docs/second-opinions
    ```
    critique 내용을 읽고 개선이 필요하면 1회 개정. journal 에 기록.
 
-8. 사용자에게 보고: 경로 + 주요 발견 3~5 줄. critique 이 있다면 그 요지도.
+10. 사용자에게 보고: 경로 + 주요 발견 3~5 줄. critique 이 있다면 그 요지도.
    "학습자료(glossary/Q&A/flashcards) 도 생성할까요?"
 
 ## 주의

@@ -1,8 +1,9 @@
 """Download PDFs for keep/maybe candidates.
 
 URL 해결 우선순위:
-1. candidate.pdf_url 가 있으면 사용
-2. arxiv_id 가 있으면 https://arxiv.org/pdf/<id>.pdf
+1. arxiv_id direct
+2. pmc_id 또는 DOI→EuropePMC PMCID resolver 의 render PDF
+3. candidate.pdf_url
 
 실패 시 needs_manual.json 에 기록 (사용자가 수동 획득).
 """
@@ -36,6 +37,8 @@ _USER_AGENT = (
     "lecture-pipeline-lit-fetch/0.1 "
     "(research tool, contact via project repo)"
 )
+_EUROPEPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+_DOI_PMC_CACHE: dict[str, str | None] = {}
 
 
 def _emit(log: LogCb | None, msg: str) -> None:
@@ -62,7 +65,42 @@ def _slugify(title: str, year: int | None, maxlen: int = 60) -> str:
     return stem[:maxlen].rstrip("-")
 
 
-def _resolve_pdf_candidates(c: dict) -> list[tuple[str, str]]:
+def _resolve_pmc_id_from_doi(doi: str | None, timeout: int) -> str | None:
+    if not doi:
+        return None
+    key = doi.strip().lower()
+    if not key:
+        return None
+    if key in _DOI_PMC_CACHE:
+        return _DOI_PMC_CACHE[key]
+    try:
+        resp = requests.get(
+            _EUROPEPMC_SEARCH,
+            params={
+                "query": f'DOI:"{doi.strip()}"',
+                "format": "json",
+                "resultType": "core",
+                "pageSize": "1",
+            },
+            timeout=timeout,
+            headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
+        )
+        if resp.status_code >= 300:
+            _DOI_PMC_CACHE[key] = None
+            return None
+        data = resp.json()
+    except (requests.RequestException, ValueError):
+        _DOI_PMC_CACHE[key] = None
+        return None
+    items = ((data.get("resultList") or {}).get("result") or [])
+    pmcid = None
+    if items:
+        pmcid = browser_fetch.normalize_pmc_id(items[0].get("pmcid"))
+    _DOI_PMC_CACHE[key] = pmcid
+    return pmcid
+
+
+def _resolve_pdf_candidates(c: dict, *, timeout: int) -> list[tuple[str, str]]:
     """한 논문에 대한 URL 후보 리스트 (strategy, url).
 
     순서: requests 로 잘 되는 것 먼저 → browser 필요한 것 나중.
@@ -75,11 +113,20 @@ def _resolve_pdf_candidates(c: dict) -> list[tuple[str, str]]:
         urls.append(("arxiv", f"https://arxiv.org/pdf/{c['arxiv_id']}.pdf"))
 
     # 2. EuropePMC direct (PMC 논문이면 PMC 보다 먼저 시도 — JS 불필요)
-    pmc_id = c.get("pmc_id")
+    pmc_id = c.get("pmc_id") or c.get("pmcid")
+    if not pmc_id and c.get("doi"):
+        pmc_id = _resolve_pmc_id_from_doi(c.get("doi"), timeout)
+        if pmc_id:
+            c["pmc_id"] = pmc_id
+        else:
+            c["_doi_pmc_lookup_failed"] = True
     if pmc_id:
         eupmc = browser_fetch.europepmc_pdf_url(pmc_id)
         if eupmc:
             urls.append(("europepmc", eupmc))
+        eupmc_legacy = browser_fetch.europepmc_fcgi_pdf_url(pmc_id)
+        if eupmc_legacy:
+            urls.append(("europepmc-fcgi", eupmc_legacy))
 
     # 3. candidate.pdf_url (search 결과에서 받은 기본)
     if c.get("pdf_url"):
@@ -100,6 +147,27 @@ def _resolve_pdf_candidates(c: dict) -> list[tuple[str, str]]:
         seen.add(u)
         out.append((strat, u))
     return out
+
+
+def _failure_category(reason: str | None, attempts: list[dict] | None = None) -> str:
+    text = " ".join(
+        [str(reason or "")]
+        + [str(a.get("reason") or "") for a in (attempts or []) if isinstance(a, dict)]
+        + [str(a.get("url") or "") for a in (attempts or []) if isinstance(a, dict)]
+    ).lower()
+    if "no pdf_url" in text or "no_url" in text:
+        return "no_url"
+    if "timeout" in text:
+        return "timeout"
+    if "not a pdf" in text or "not-pdf" in text or "ctype=text/html" in text:
+        return "not_pdf"
+    if "captcha" in text or "cloudflare" in text or "bot" in text or "turnstile" in text:
+        return "bot_challenge"
+    if "403" in text or "401" in text or "paywall" in text or "unauthorized" in text:
+        return "paywall"
+    if "no pmc" in text or "no_pmc" in text:
+        return "no_pmc"
+    return "unknown"
 
 
 _JS_CHALLENGE_HOSTS = (
@@ -278,7 +346,7 @@ def run_lit_fetch(
         은 건너뛰고 phase 2 에 위임."""
         if _is_cancelled():
             return {"id": c.get("id"), "ok": False, "reason": "cancelled"}
-        url_candidates = _resolve_pdf_candidates(c)
+        url_candidates = _resolve_pdf_candidates(c, timeout=timeout)
         slug = _slugify(c.get("title", ""), c.get("year"))
         item: dict = {
             "id": c.get("id"),
@@ -289,7 +357,12 @@ def run_lit_fetch(
             "ok": False,
         }
         if not url_candidates:
-            item["reason"] = "no pdf_url / arxiv_id / pmc_id"
+            if c.get("_doi_pmc_lookup_failed"):
+                item["reason"] = "no PMC/open PDF URL for DOI"
+                item["failure_category"] = "no_pmc"
+            else:
+                item["reason"] = "no pdf_url / arxiv_id / pmc_id"
+                item["failure_category"] = "no_url"
             return item
 
         dest = Path(f"papers/{slug}.pdf")
@@ -384,8 +457,16 @@ def run_lit_fetch(
                     "title": item.get("title"),
                     "attempts": item.get("attempts", []),
                     "reason": item.get("reason"),
+                    "failure_category": item.get("failure_category")
+                    or _failure_category(item.get("reason"), item.get("attempts", [])),
                 })
             report.append({k: v for k, v in item.items() if k != "data"})
+
+    def _attempts_for(paper_id: str | None) -> list[dict]:
+        for r in report:
+            if r.get("id") == paper_id:
+                return r.get("attempts", []) or []
+        return []
 
     # Phase 2: browser 순차
     if browser_queue and not _is_cancelled():
@@ -401,6 +482,7 @@ def run_lit_fetch(
                     "title": meta["title"],
                     "url_tried": [u for _, u in urls],
                     "reason": f"browser 비활성 (phase1 fail: {prev})",
+                    "failure_category": _failure_category(prev, _attempts_for(meta["id"])),
                 })
         else:
             ok_avail, msg_avail = browser_fetch.is_available()
@@ -412,6 +494,7 @@ def run_lit_fetch(
                         "title": meta["title"],
                         "url_tried": [u for _, u in urls],
                         "reason": f"playwright 미설치: {msg_avail}",
+                        "failure_category": "bot_challenge",
                     })
             else:
                 _emit(
@@ -493,6 +576,10 @@ def run_lit_fetch(
                                     "title": meta["title"],
                                     "url_tried": [u for _, u in urls],
                                     "reason": "browser phase 도 실패",
+                                    "failure_category": _failure_category(
+                                        "browser phase 도 실패",
+                                        _attempts_for(meta["id"]),
+                                    ),
                                 })
                 except RuntimeError as exc:
                     _emit(log, f"[lit_fetch] phase 2 browser 세션 실패: {exc}")
@@ -502,6 +589,7 @@ def run_lit_fetch(
                             "title": meta["title"],
                             "url_tried": [u for _, u in urls],
                             "reason": f"browser 세션 실패: {exc}",
+                            "failure_category": _failure_category(str(exc)),
                         })
 
     outputs["download_report.json"] = json.dumps(

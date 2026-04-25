@@ -2,6 +2,7 @@
   "batch": true,
   "output_dir": "lit_search",
 
+  "domain_profile": "mixed",
   "sources": ["semantic_scholar", "pubmed", "arxiv"],
   "max_per_source": 50,
   "timeout": 120,
@@ -11,6 +12,7 @@
     "candidates.json": "candidates.json",
     "raw_semantic_scholar.json": "raw_semantic_scholar.json",
     "raw_arxiv.xml": "raw_arxiv.xml",
-    "raw_pubmed.json": "raw_pubmed.json"
+    "raw_pubmed.json": "raw_pubmed.json",
+    "raw_europepmc.json": "raw_europepmc.json"
   }
 }

@@ -289,6 +289,7 @@ class BrowserSession:
             url_lower.endswith(".pdf")
             or ".pdf?" in url_lower
             or "/pdf/" in url_lower
+            or "pdf=render" in url_lower
             or "ptpmcrender" in url_lower
             or "blobtype=pdf" in url_lower
         )
@@ -546,7 +547,7 @@ class BrowserSession:
             # 클래스 힌트
             ['a.btn-pdf', 'a.download-pdf', 'a.PdfDownload'],
             # EuropePMC / NCBI 쿼리 URL
-            ['a[href*="ptpmcrender.fcgi"]'],
+            ['a[href*="pdf=render"]', 'a[href*="ptpmcrender.fcgi"]'],
         ]
         # 1차: visible 매치만
         for group in selector_groups:
@@ -589,10 +590,15 @@ def europepmc_pdf_url(pmc_id: str) -> str | None:
     norm = normalize_pmc_id(pmc_id)
     if not norm:
         return None
-    return (
-        f"https://europepmc.org/backend/ptpmcrender.fcgi"
-        f"?accid={norm}&blobtype=pdf"
-    )
+    return f"https://europepmc.org/articles/{norm}?pdf=render"
+
+
+def europepmc_fcgi_pdf_url(pmc_id: str) -> str | None:
+    """Legacy EuropePMC PDF endpoint. render URL 실패 시 fallback."""
+    norm = normalize_pmc_id(pmc_id)
+    if not norm:
+        return None
+    return f"https://europepmc.org/backend/ptpmcrender.fcgi?accid={norm}&blobtype=pdf"
 
 
 def pmc_article_url(pmc_id: str) -> str | None:
