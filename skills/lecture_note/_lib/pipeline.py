@@ -38,7 +38,7 @@ from _lib.slides_flatten import flatten_slides
 from _lib.vision_extract import enrich_pdf_pages
 
 
-CACHE_VERSION = "v5"
+CACHE_VERSION = "v6"
 
 
 def _invalidate_stale_cache(
@@ -52,7 +52,10 @@ def _invalidate_stale_cache(
     - v2 → v3: compose 프롬프트 변경 + step1b/step5b 추가
     - v3 → v4: multi-PDF slides_data 포맷 변경 + compute_run_id 순서 민감화
     - v4 → v5: vision enrichment 추가 → step1 재계산
-    - 누적 적용 (v1→v5 는 모든 단계 적용)
+    - v5 → v6: align prompt 가 transcript 인라인 → lecture_summary 인라인 + 파일
+      주입 방식으로 전환. step2_alignments + step2_batches 재계산 필요. 단조성
+      변경에 영향받는 step2b/step3 + 그 이후 step 들도 재실행.
+    - 누적 적용 (v1→v6 는 모든 단계 적용)
     """
     removed: list[str] = []
     files_to_remove: set[str] = set()
@@ -101,6 +104,30 @@ def _invalidate_stale_cache(
         dirs_to_remove.update({
             "step1_slides",
             "step0v_enriched",
+        })
+
+    if from_version in ("v1", "v2", "v3", "v4", "v5"):
+        # v6: align prompt 변경 → step2 부터 재계산. step2 결과가 바뀌면
+        # review/reconcile/compose/polish/exam_cues/compact* 모두 영향이라
+        # 보수적으로 step2 이후 전부 무효화.
+        files_to_remove.update({
+            "step2_alignments.json",
+            "step2b_reviewed.json",
+            "step3_mapping.json",
+            "step6_note.md",
+            "step7_note.json",
+            "step8_note.html",
+            "step9_exam_cues.json",
+            "step10_compact_glossary.json",
+            "step11_compact_summary.json",
+            "step12_compact.html",
+        })
+        dirs_to_remove.update({
+            "step2_batches",
+            "step5_pages",
+            "step5a_compact_pages",
+            "step5b_polished",
+            "step5c_compact_polished",
         })
 
     for name in sorted(files_to_remove):
@@ -362,6 +389,7 @@ def _run_pipeline_body(
             slides_data=slides_data,
             numbered_txts=numbered,
             pdf_paths=pdfs,
+            lecture_summary=lecture_summary,
             batch_ckpt_dir=batch_ckpt_dir,
             batch_size=batch_size,
             overlap=overlap,

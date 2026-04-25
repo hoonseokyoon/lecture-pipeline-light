@@ -27,6 +27,7 @@ from _lib.schemas import build_alignment_schema
 def build_batch_prompt(
     slides_data: dict,
     numbered_txts: dict[str, dict],
+    lecture_summary: dict,
     prior_assignments: dict[int, list],
     target_start: int,
     target_end: int,
@@ -37,10 +38,21 @@ def build_batch_prompt(
     Args:
         slides_data: {"pages": [{"index", "title", "anchors", "brief"}, ...]}
         numbered_txts: {src_name: {"path": Path, "line_count": int}}
+        lecture_summary: step1b 산출. `overall_theme` + `key_mechanisms` +
+            `page_importance` 를 prompt 에 인라인 — 전체 녹취록 텍스트를
+            통째로 박는 대신 전역 흐름을 요약으로만 제공.
         prior_assignments: {page_idx: [{"source","start_line","end_line"}, ...]}
         target_start, target_end: 이번 배치의 페이지 번호 범위 (inclusive)
         overlap_start: overlap이 시작되는 페이지 번호 (prior에 존재하는 첫 번째).
             None이면 첫 배치라 overlap 없음.
+
+    설계 노트:
+        이전 버전은 numbered transcript 두 파일 통째를 prompt 에 인라인 했고,
+        agent loop 가 매 step 마다 그 거대 컨텍스트를 누적시키며 호출당
+        1M+ 토큰까지 폭발했음. 본 버전은 (a) lecture_summary 로 전역 흐름을
+        대체하고 (b) numbered transcript 는 `inputs/<basename>.txt` 파일로
+        주입해 agent 가 prior_assignments + slide anchors 기반 추정 후 필요한
+        라인 범위만 부분 읽도록 유도.
     """
     lines: list[str] = []
 
@@ -63,8 +75,54 @@ def build_batch_prompt(
                  "numbered 녹취록의 `[NNNN] ` prefix 번호 그대로.")
     lines.append("- 페이지 내용과 직접 매칭이 안 되는 경우(교수가 슬라이드를 "
                  "넘기며 다음으로 빨리 지나간 경우 등) 빈 배열로 두는 것도 허용.")
-    lines.append("- `inputs/` 에 PDF 원본이 있음 (multi-PDF 시 파일명별로 보존). "
-                 "필요 시 shell 로 확인 가능 (필수 아님).")
+    lines.append("")
+    lines.append("## 입력 파일")
+    lines.append("")
+    lines.append(
+        "`inputs/` 에 두 종류 파일이 있습니다:"
+    )
+    lines.append("")
+    lines.append(
+        "- **PDF 원본** (multi-PDF 시 파일명별 보존): 필요 시 fitz/PyMuPDF 로 "
+        "특정 페이지만 부분 추출. 슬라이드 anchor 텍스트와 lecture_summary 가 "
+        "프롬프트에 이미 있으므로 PDF 직접 확인은 통상 불필요."
+    )
+    lines.append(
+        "- **numbered transcript 파일들** (`source` 필드와 동일한 basename). "
+        "각 라인은 `[NNNN] ` prefix 형식. **전체 dump 금지** — 토큰 폭발 방지."
+    )
+    lines.append("")
+    lines.append("## 녹취록 부분 읽기 전략 (필수)")
+    lines.append("")
+    lines.append(
+        "1. `lecture_summary` + `slide anchors` 로 이번 배치 페이지가 녹취록 "
+        "어느 영역에 있을지 **추정**. prior_assignments 의 마지막 라인이 강한 "
+        "단서."
+    )
+    lines.append(
+        "2. PowerShell 로 해당 영역만 읽기. 예시:"
+    )
+    lines.append("")
+    lines.append("```powershell")
+    lines.append(
+        "# 라인 100-180 만 읽기 (50라인이면 보통 1-2 페이지 분량)"
+    )
+    lines.append(
+        '(Get-Content -Path "inputs/<source>") | Select-Object -Skip 99 -First 80'
+    )
+    lines.append("")
+    lines.append("# 또는 anchor 키워드로 검색 + 인접 라인:")
+    lines.append(
+        'Select-String -Path "inputs/<source>" -Pattern "건강의 정의" -Context 5,5'
+    )
+    lines.append("```")
+    lines.append("")
+    lines.append(
+        "3. 추정 영역에서 페이지 anchor 와 매칭되는 정확한 시작/끝 라인을 결정."
+    )
+    lines.append(
+        "4. 한 번에 모든 페이지를 처리하지 말고 페이지 단위로 좁혀가며 읽기."
+    )
     lines.append("")
 
     # ── multi-source 컨텍스트 + 규칙 + source 화이트리스트 ──
@@ -74,16 +132,33 @@ def build_batch_prompt(
 
     lines.extend(build_grouped_slide_summary(slides_data))
 
-    lines.append("## 전체 녹취록")
+    # ── 전체 강의 흐름 요약 (전체 transcript 인라인 대체) ──
+    lines.append("## 전체 강의 흐름 (요약)")
     lines.append("")
-    for src_name, info in numbered_txts.items():
-        path = info["path"]
-        line_count = info["line_count"]
-        lines.append(f"### {src_name} (총 {line_count} lines)")
+    overall_theme = (lecture_summary.get("overall_theme") or "").strip()
+    if overall_theme:
+        lines.append(f"**전체 주제**: {overall_theme}")
         lines.append("")
-        lines.append("```")
-        lines.append(Path(path).read_text(encoding="utf-8").rstrip("\n"))
-        lines.append("```")
+    key_mechs = lecture_summary.get("key_mechanisms") or []
+    if isinstance(key_mechs, list) and key_mechs:
+        lines.append("**핵심 메커니즘**:")
+        for m in key_mechs:
+            if isinstance(m, str) and m.strip():
+                lines.append(f"- {m.strip()}")
+        lines.append("")
+    page_imp = lecture_summary.get("page_importance") or []
+    if isinstance(page_imp, list) and page_imp:
+        lines.append("**페이지별 위치 / 중요도** (각 슬라이드가 강의 흐름에서 차지하는 역할):")
+        lines.append("")
+        for entry in page_imp:
+            if not isinstance(entry, dict):
+                continue
+            pg = entry.get("page")
+            level = entry.get("level", "")
+            reason = (entry.get("reason") or "").strip()
+            if pg is None:
+                continue
+            lines.append(f"- p.{pg} [{level}]: {reason}")
         lines.append("")
 
     # ── 고정 prefix 끝, 가변 suffix 시작 ──
@@ -152,6 +227,7 @@ def align_pages_batched(
     slides_data: dict,
     numbered_txts: dict[str, dict],
     pdf_paths: list[Path],
+    lecture_summary: dict,
     batch_ckpt_dir: Path,
     batch_size: int,
     overlap: int,
@@ -165,6 +241,11 @@ def align_pages_batched(
 
     반환: `{page_idx: [{"source","start_line","end_line"}, ...]}`
     page_idx 는 global index.
+
+    `lecture_summary` (step1b 산출) 가 prompt 인라인으로 들어가 전역 흐름을
+    제공하고, numbered transcript 파일들은 inputs/ 에 file 로 주입돼 agent 가
+    필요한 라인 범위만 부분 읽도록 유도. 이전 버전은 transcript 통째 inline
+    이라 호출당 1M+ 토큰 폭발했음.
     """
     num_pages = len(slides_data.get("pages", []))
     if num_pages == 0:
@@ -173,10 +254,15 @@ def align_pages_batched(
     batches = batch_ranges(num_pages, batch_size, overlap)
     _emit(log_callback, f"[align] {num_pages}페이지 → {len(batches)}배치")
 
-    # Codex inputs: 모든 PDF 를 원본 파일명 그대로 전달
-    pdf_inputs: dict[str, Path] = {}
+    # Codex inputs: PDF + numbered transcript 둘 다 file 로 주입.
+    # transcript basename 은 `source` 필드와 일치 — agent 가 그대로 참조 가능.
+    base_inputs: dict[str, Path] = {}
     for pdf_path in pdf_paths:
-        pdf_inputs[pdf_path.name] = pdf_path
+        base_inputs[pdf_path.name] = pdf_path
+    for src_name, info in numbered_txts.items():
+        # numbered_txts 키 = basename = source. PDF 와 충돌 시 transcript 우선.
+        # (실제로 .pdf vs .txt 라 충돌은 발생 안 함)
+        base_inputs[src_name] = Path(info["path"])
 
     # 동적 schema: source 필드를 numbered_txts 화이트리스트로 강제
     allowed_sources = list(numbered_txts.keys())
@@ -195,6 +281,7 @@ def align_pages_batched(
             prompt = build_batch_prompt(
                 slides_data=slides_data,
                 numbered_txts=numbered_txts,
+                lecture_summary=lecture_summary,
                 prior_assignments=all_assignments,
                 target_start=bstart,
                 target_end=bend,
@@ -206,7 +293,7 @@ def align_pages_batched(
             )
             result = run_codex_task(
                 prompt=prompt,
-                inputs=pdf_inputs,
+                inputs=base_inputs,
                 expected_outputs=["assignments.json"],
                 output_schema=schema,
                 model=model,
