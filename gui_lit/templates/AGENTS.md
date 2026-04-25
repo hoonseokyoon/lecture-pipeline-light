@@ -13,7 +13,7 @@
 1. 사용자의 요구사항(RFI) 을 해석하고 작전으로 분해
 2. 외주 스킬(lit_search, lit_fetch, doc_to_md, lit_summarize, ...) 을 호출해 자료 수집·처리
 3. 결과를 검토·종합해 리뷰 문서 / 학습자료 생성
-4. 모든 중요 결정은 `.litproj/journal.jsonl` 에 기록
+4. 모든 중요 결정은 안전 CLI 로 `.litproj/journal.jsonl` 에 기록
 5. 의미있는 산출물 단위로 `git commit` (사용자는 commit 단위로 롤백 가능)
 
 당신 혼자 판단하지 말고, **애매한 분기점에서는 사용자에게 물어라** — `.litproj/inbox/`
@@ -111,12 +111,14 @@
 
 | 도구 | 호출 | 용도 |
 |---|---|---|
-| `lit_search` | `python $LIT_HARNESS_ROOT/run_skill.py lit_search requirements.md --out .` | 요구사항 → 후보 논문 JSON |
+| `lit_search` | `python $LIT_HARNESS_ROOT/run_skill.py lit_search query_plan.json --out .` | 요구사항 → 후보 논문 JSON (`domain_profile` 필수 선택) |
 | `lit_fetch` | `python $LIT_HARNESS_ROOT/run_skill.py lit_fetch candidates.json --out originals/papers` | PDF 다운로드 |
 | `doc_to_md` | `python $LIT_HARNESS_ROOT/run_skill.py doc_to_md <pdf>...` | PDF → Markdown |
 | `lit_summarize` | `python $LIT_HARNESS_ROOT/run_skill.py lit_summarize <doc.md 또는 candidate.json>...` | per-paper 요약 (abstract-only 가능) |
 | `second_opinion` | `python $LIT_HARNESS_ROOT/run_skill.py second_opinion <review.md> --out agent-docs/second-opinions` | Codex 로 당신 산출물을 독립 평가 |
 | Codex 직접 | `codex exec --model gpt-5.4 "<prompt>"` | 간단한 대안 관점 (구조화 X) |
+| DB rebuild | `python -m gui_lit.db ingest . --rebuild --verbose` | 파일시스템 기준 state.sqlite 재생성 |
+| doctor | `python -m gui_lit.doctor .` | close 전 무결성 검사 |
 | sqlite CLI | `sqlite3 .litproj/state.sqlite "<sql>"` | DB 직접 쿼리 |
 
 스킬 출력은 workspace 규약에 따라 적절한 하위 폴더에 저장됩니다 (`--out`).
@@ -130,6 +132,10 @@
 # 1) 리뷰 초안 작성 후
 python $LIT_HARNESS_ROOT/run_skill.py second_opinion \
     agent-docs/reviews/rfi-<id>-review.md \
+    REQUEST_FOR_INFORMATION.md \
+    agent-docs/reviews/rfi-<id>-claim-matrix.json \
+    .litproj/runs/<latest>/candidates.json \
+    .litproj/runs/<latest>/triaged.json \
     --out agent-docs/second-opinions
 # → agent-docs/second-opinions/rfi-<id>-review-critique.md 생성
 
@@ -165,7 +171,27 @@ journal 에 `kind: "second_opinion_requested" | "second_opinion_received"` 기�
 - `commit` — git commit 수행
 - `question` — 사용자에게 묻는 질문 (inbox 로 drop 한 경우)
 
-매 중요 결정마다 한 줄 이상 남기세요. 이게 당신의 **영속 메모리** 입니다.
+매 중요 결정마다 한 줄 이상 남기세요. journal 파일에 `printf`, shell redirect,
+직접 `open(..., 'a')` 로 쓰지 마세요. 항상 다음 CLI 를 사용합니다:
+
+```bash
+python -m gui_lit.ipc append-journal . \
+  --event-json '{"actor":"head","kind":"decision","rfi":"<id>","summary":"..."}'
+```
+
+CLI 가 timestamp 와 trailing newline 을 보장합니다. 이게 당신의 **영속 메모리** 입니다.
+
+## 운영 규칙
+
+- 검색 전 RFI/PIR domain 을 `biomed`, `ml_cs`, `physics`, `mixed` 중 하나로
+  정하고 `query_plan.json` 의 `domain_profile` 에 명시하세요. 생의학/생물학
+  RFI 는 기본 `biomed` 이며 arXiv 를 기본 source 로 쓰지 않습니다.
+- abstract-only 근거는 핵심 결론에서 confidence 를 낮추고 review/claim matrix
+  에 명시하세요.
+- review 작성 전 claim matrix 를 먼저 만들고, 인용 없는 핵심 주장은 본문에
+  넣지 마세요.
+- RFI close 전 반드시 `python -m gui_lit.doctor .` 와
+  `python -m gui_lit.db ingest . --rebuild --verbose` 를 통과시키세요.
 
 ## 미획득 논문 처리 정책 (Hybrid workflow)
 

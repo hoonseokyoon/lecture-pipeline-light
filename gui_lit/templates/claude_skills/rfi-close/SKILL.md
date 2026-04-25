@@ -15,39 +15,46 @@ description: Close the current RFI — commit final state, mark status, and prop
 2. 미커밋 변경분 점검: `git status --short`. 있으면 의미있는 단위로 `git add`
    + `git commit` 수행. 커밋 메시지는 RFI id 접두사: `rfi-<id>: <요약>`.
 
-3. 해당 RFI 파일 (`agent-docs/rfi/<id>-<slug>.md`) 의 front matter 업데이트:
+3. close preflight:
+   ```bash
+   python -m gui_lit.db ingest . --rebuild --verbose
+   python -m gui_lit.doctor .
+   ```
+   doctor error 가 있으면 close 금지. claim matrix
+   `agent-docs/reviews/rfi-<id>-claim-matrix.json` 존재 여부도 확인.
+
+4. 해당 RFI 파일 (`agent-docs/rfi/<id>-<slug>.md`) 과
+   `REQUEST_FOR_INFORMATION.md` 의 front matter 를 모두 업데이트:
    - `status: "done"` (또는 사용자 지시에 따라 `abandoned`)
    - `updated: "<ISO8601 now>"`
    - 본문 말미에 `## Outcome` 섹션 추가 — 산출물 경로, 핵심 결론 3~5줄.
+   - active pointer 를 계속 유지하지 않을 경우 `REQUEST_FOR_INFORMATION.md` 에
+     "현재 active RFI 없음" 상태를 명시.
 
-4. journal 기록:
+5. journal 기록 (직접 append 금지):
    ```bash
-   python -c "
-   import json, datetime
-   with open('.litproj/journal.jsonl', 'a', encoding='utf-8') as f:
-       f.write(json.dumps({
-           'ts': datetime.datetime.utcnow().isoformat()+'Z',
-           'actor': 'head',
-           'kind': 'rfi_closed',
-           'rfi': '<id>',
-           'status': 'done',
-           'deliverables': ['path/to/review.md', ...]
-       }, ensure_ascii=False) + '\\n')
-   "
+   python -m gui_lit.ipc append-journal . \
+     --event-json '{"actor":"head","kind":"rfi_closed","rfi":"<id>","status":"done","deliverables":["path/to/review.md"]}'
    ```
 
-5. 최종 커밋:
+6. close 후 재검사:
+   ```bash
+   python -m gui_lit.db ingest . --rebuild --verbose
+   python -m gui_lit.doctor .
+   ```
+
+7. 최종 커밋:
    ```bash
    git add -A  # RFI 파일 + journal
    git commit -m "rfi-<id>: close — <요약>"
    ```
 
-6. **main 머지는 사용자 승인 필요**. 다음과 같이 보고:
+8. **main 머지는 사용자 승인 필요**. 다음과 같이 보고:
    "RFI-<id> 완료. 브랜치 rfi/<id>-<slug> 에 <N>개 커밋 누적됨.
    main 에 머지하시겠어요? (승인하시면 `git switch main && git merge --no-ff
    rfi/<id>-<slug>` 수행)"
 
-7. 사용자가 승인하면 머지, 아니면 브랜치 유지하고 다음 지시 대기.
+9. 사용자가 승인하면 머지, 아니면 브랜치 유지하고 다음 지시 대기.
 
 ## 주의
 

@@ -13,10 +13,9 @@ description: Open a new Request for Information. Creates a feature branch, a new
    부족하면 사용자에게 물어본 뒤 진행.
 
 2. RFI 번호 결정:
-   ```bash
-   ls agent-docs/rfi/ 2>/dev/null | wc -l  # 현재 개수
-   ```
-   새 번호 = (현재 최대 + 1), 4자리 zero-pad (예: `0003`).
+   기존 `agent-docs/rfi/*.md` front matter 의 `id:` 값을 모두 읽어 최대값을
+   파싱합니다. 파일 개수(`ls | wc -l`)로 세지 마세요. 새 번호 =
+   (현재 최대 id + 1), 4자리 zero-pad (예: `0003`).
 
 3. slug 결정: 제목을 kebab-case, 영문 소문자, 30자 내.
    예: "Diffusion TTS artifact survey" → `diffusion-tts-artifacts`.
@@ -67,29 +66,31 @@ description: Open a new Request for Information. Creates a feature branch, a new
    것임을 반영. 상단 front matter 의 id/slug/status/branch 를 동기화하고,
    본문의 "현재 RFI" 섹션을 새 RFI 의 요약으로 교체.
 
-7. journal 기록 (append-only):
-   ```bash
-   python -c "
-   import json, datetime
-   with open('.litproj/journal.jsonl', 'a', encoding='utf-8') as f:
-       f.write(json.dumps({
-           'ts': datetime.datetime.utcnow().isoformat()+'Z',
-           'actor': 'head',
-           'kind': 'rfi_opened',
-           'rfi': '<id>',
-           'title': '<제목>',
-           'branch': 'rfi/<id>-<slug>'
-       }, ensure_ascii=False) + '\\n')
-   "
+7. 새 RFI 생성 직후 검색 계획 `query_plan.json` 작성:
+   ```json
+   {
+     "rfi": "<id>",
+     "query": "<핵심 검색식>",
+     "domain_profile": "biomed|ml_cs|physics|mixed",
+     "year_min": 2020,
+     "max_per_source": 50,
+     "notes": "생물학/생의학 RFI 는 biomed 로 시작하고 arXiv 는 기본 제외"
+   }
    ```
 
-8. 초기 커밋:
+8. journal 기록 (직접 append 금지):
    ```bash
-   git add agent-docs/rfi/<id>-<slug>.md REQUEST_FOR_INFORMATION.md .litproj/journal.jsonl
+   python -m gui_lit.ipc append-journal . \
+     --event-json '{"actor":"head","kind":"rfi_opened","rfi":"<id>","title":"<제목>","branch":"rfi/<id>-<slug>"}'
+   ```
+
+9. 초기 커밋:
+   ```bash
+   git add agent-docs/rfi/<id>-<slug>.md REQUEST_FOR_INFORMATION.md query_plan.json .litproj/journal.jsonl
    git commit -m "rfi: open <id> — <제목>"
    ```
 
-9. 사용자에게 결과 보고: "RFI-<id> 가 열렸습니다. 브랜치 rfi/<id>-<slug> 에서
+10. 사용자에게 결과 보고: "RFI-<id> 가 열렸습니다. 브랜치 rfi/<id>-<slug> 에서
    작업 시작합니다. 다음 단계로 문헌 검색 쿼리를 제안드릴까요?"
 
 ## 주의

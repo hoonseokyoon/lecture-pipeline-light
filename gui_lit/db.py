@@ -13,6 +13,8 @@ DB 는 `.gitignore` 이므로 언제든 재빌드 가능. 원본 데이터는 `o
 
 from __future__ import annotations
 
+import argparse
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +35,8 @@ CREATE TABLE IF NOT EXISTS papers (
     id              TEXT PRIMARY KEY,     -- 내부 slug (DOI 기반 or arxiv id)
     doi             TEXT,
     arxiv_id        TEXT,
+    pmid            TEXT,
+    pmc_id          TEXT,
     title           TEXT NOT NULL,
     authors         TEXT,                 -- JSON array
     year            INTEGER,
@@ -128,10 +132,26 @@ def connect(project_root: Path) -> sqlite3.Connection:
 def init_schema(project_root: Path) -> None:
     with connect(project_root) as conn:
         conn.executescript(SCHEMA_SQL)
+        _ensure_schema_columns(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
         )
+
+
+def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(papers)").fetchall()}
+    for name, decl in (("pmid", "TEXT"), ("pmc_id", "TEXT")):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE papers ADD COLUMN {name} {decl}")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_pmid "
+        "ON papers(pmid) WHERE pmid IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_papers_pmc_id "
+        "ON papers(pmc_id) WHERE pmc_id IS NOT NULL"
+    )
 
 
 def upsert_paper(project_root: Path, row: dict) -> None:
@@ -145,7 +165,7 @@ def upsert_paper(project_root: Path, row: dict) -> None:
         raise DbError(f"upsert_paper: 누락 키 {missing}")
 
     cols = [
-        "id", "doi", "arxiv_id", "title", "authors", "year", "venue",
+        "id", "doi", "arxiv_id", "pmid", "pmc_id", "title", "authors", "year", "venue",
         "abstract", "pdf_url", "source", "citation_count",
         "original_path", "extracted_path", "status", "notes",
         "added_ts", "updated_ts",
@@ -243,6 +263,8 @@ def _normalize_candidate(c: dict) -> dict:
         "id": c.get("id") or "unknown",
         "doi": c.get("doi"),
         "arxiv_id": c.get("arxiv_id"),
+        "pmid": c.get("pmid"),
+        "pmc_id": c.get("pmc_id") or c.get("pmcid"),
         "title": (c.get("title") or "").strip() or "(untitled)",
         "authors": (
             __import__("json").dumps(c.get("authors") or [], ensure_ascii=False)
@@ -277,28 +299,112 @@ def _slug_from_title(title: str, year: int | None) -> str:
     return stem[:60].rstrip("-")
 
 
+def _strip_doc_suffix(stem: str) -> str:
+    return stem[:-4] if stem.endswith("-doc") else stem
+
+
+def _aliases_for_candidate(c: dict) -> set[str]:
+    aliases: set[str] = set()
+    cid = c.get("id")
+    if cid:
+        aliases.add(str(cid))
+    title = c.get("title") or ""
+    year = c.get("year") if isinstance(c.get("year"), int) else None
+    if title:
+        aliases.add(_slug_from_title(title, year))
+    for key in ("local_path", "original_path"):
+        val = c.get(key)
+        if val:
+            aliases.add(Path(str(val)).stem)
+            aliases.add(_strip_doc_suffix(Path(str(val)).stem))
+    return {a for a in aliases if a}
+
+
+def _candidate_list(data) -> list[dict]:
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = (
+            data.get("entries")
+            or data.get("items")
+            or data.get("candidates")
+            or []
+        )
+    else:
+        raw = []
+    return [c for c in raw if isinstance(c, dict)]
+
+
+def _triage_entries(data) -> list[dict]:
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = (
+            data.get("entries")
+            or data.get("items")
+            or data.get("candidates")
+            or []
+        )
+    else:
+        raw = []
+    return [c for c in raw if isinstance(c, dict)]
+
+
+def _rfi_id_from_path(path: Path, data: dict | None = None) -> str:
+    if data and data.get("rfi"):
+        return str(data["rfi"]).zfill(4) if str(data["rfi"]).isdigit() else str(data["rfi"])
+    import re
+    s = str(path).replace("\\", "/")
+    for pat in (r"rfi[-_](\d{3,})", r"/(\d{3,})-[^/]+/"):
+        m = re.search(pat, s)
+        if m:
+            return m.group(1)
+    return "unknown"
+
+
+def _delete_cache_rows(project_root: Path) -> None:
+    init_schema(project_root)
+    with connect(project_root) as conn:
+        conn.execute("BEGIN")
+        try:
+            for table in (
+                "citations",
+                "summaries",
+                "paper_rfi_links",
+                "search_runs",
+                "papers_fts",
+                "papers",
+            ):
+                conn.execute(f"DELETE FROM {table}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
 def ingest_from_filesystem(
     project_root: Path,
     *,
     verbose: bool = False,
+    rebuild: bool = True,
 ) -> dict[str, int]:
-    """프로젝트 파일시스템 스캔 → papers 테이블 upsert.
+    """프로젝트 파일시스템 스캔 → state.sqlite 재생성/업서트.
 
     스캔 대상:
       - **/candidates.json         lit_search 산출 → papers 기본 메타
       - **/triaged.json            triage 결정 → paper_rfi_links
-      - agent-docs/summaries/*.json  lit_summarize → summaries + status 승격
+      - agent-docs/summaries/**/*.json  lit_summarize → summaries + status 승격
       - originals/papers/*.pdf      다운로드 여부 → status / original_path
-      - extracted/*/doc.md          OCR 완료 → status / extracted_path
+      - extracted/<slug>-doc.md 또는 extracted/<slug>/doc.md → OCR 완료
 
-    멱등: 같은 id 는 upsert 로 덮어쓰기. 호출마다 새로 스캔.
+    기본값 rebuild=True. state.sqlite 는 gitignore 된 캐시이므로 stale row 를
+    남기지 않기 위해 캐시 테이블을 비운 뒤 파일시스템 기준으로 재생성한다.
     반환: {'papers': N, 'triaged': M, 'summaries': K, 'originals': P, 'extracted': Q}
     """
-    import json as _json
-    import glob as _glob
-
     project_root = Path(project_root).resolve()
     init_schema(project_root)
+    if rebuild:
+        _delete_cache_rows(project_root)
 
     stats = {
         "papers": 0,
@@ -307,6 +413,24 @@ def ingest_from_filesystem(
         "originals": 0,
         "extracted": 0,
     }
+    aliases: dict[str, str] = {}
+
+    def _remember_aliases(pid: str, new_aliases: set[str]) -> None:
+        for alias in new_aliases:
+            aliases.setdefault(alias, pid)
+
+    def _find_paper_id(conn: sqlite3.Connection, *candidates: str | None) -> str | None:
+        for raw in candidates:
+            if not raw:
+                continue
+            stem = _strip_doc_suffix(str(raw))
+            for key in (str(raw), stem):
+                if key in aliases:
+                    return aliases[key]
+                row = conn.execute("SELECT id FROM papers WHERE id = ?", (key,)).fetchone()
+                if row:
+                    return row["id"]
+        return None
 
     # 1) candidates.json → papers upsert
     for cand_path in project_root.rglob("candidates.json"):
@@ -314,17 +438,15 @@ def ingest_from_filesystem(
         if ".git" in cand_path.parts:
             continue
         try:
-            data = _json.loads(cand_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError):
+            data = json.loads(cand_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
-        candidates = data.get("candidates") or data.get("items") or []
-        if not isinstance(candidates, list):
-            continue
+        candidates = _candidate_list(data)
         for c in candidates:
-            if not isinstance(c, dict):
-                continue
             try:
-                upsert_paper(project_root, _normalize_candidate(c))
+                row = _normalize_candidate(c)
+                upsert_paper(project_root, row)
+                _remember_aliases(row["id"], _aliases_for_candidate(c))
                 stats["papers"] += 1
             except (DbError, sqlite3.Error) as exc:
                 if verbose:
@@ -335,25 +457,19 @@ def ingest_from_filesystem(
         if ".git" in tr_path.parts:
             continue
         try:
-            data = _json.loads(tr_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError):
+            data = json.loads(tr_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
-        # rfi id 추출 — 경로에 rfi-NNNN 패턴 찾기 (best-effort)
-        import re as _re
-        m = _re.search(r"rfi[-_](\d{3,})", str(tr_path).replace("\\", "/"))
-        rfi_id = m.group(1) if m else "unknown"
-        items = data.get("items") or data.get("candidates") or data
-        if not isinstance(items, list):
-            continue
+        rfi_id = _rfi_id_from_path(tr_path, data if isinstance(data, dict) else None)
+        items = _triage_entries(data)
         now = _iso_now()
         with connect(project_root) as conn:
             for it in items:
-                if not isinstance(it, dict):
-                    continue
                 pid = it.get("id")
                 dec = it.get("decision")
                 if not pid or not dec:
                     continue
+                db_pid = _find_paper_id(conn, str(pid)) or str(pid)
                 try:
                     conn.execute(
                         """
@@ -364,7 +480,7 @@ def ingest_from_filesystem(
                             reason=excluded.reason,
                             ts=excluded.ts
                         """,
-                        (pid, rfi_id, dec, it.get("reason"), now),
+                        (db_pid, rfi_id, dec, it.get("reason"), now),
                     )
                     stats["triaged"] += 1
                 except sqlite3.Error:
@@ -377,21 +493,17 @@ def ingest_from_filesystem(
             for pdf in originals_dir.glob("*.pdf"):
                 rel = str(pdf.relative_to(project_root)).replace("\\", "/")
                 slug = pdf.stem
-                # slug 기반으로 papers 에서 가장 근접한 row 찾기 — title 의 slug 와 매치
-                # 정확도 낮지만 MVP 로 OK
-                row = None
-                try:
-                    cur = conn.execute(
-                        "SELECT id, title, year, status FROM papers"
-                    )
-                    for r in cur.fetchall():
-                        cand_slug = _slug_from_title(r["title"], r["year"])
-                        if cand_slug == slug:
-                            row = r
-                            break
-                except sqlite3.Error:
-                    pass
-                if row:
+                pid = _find_paper_id(conn, slug)
+                if pid is None:
+                    try:
+                        cur = conn.execute("SELECT id, title, year FROM papers")
+                        for r in cur.fetchall():
+                            if _slug_from_title(r["title"], r["year"]) == slug:
+                                pid = r["id"]
+                                break
+                    except sqlite3.Error:
+                        pass
+                if pid:
                     try:
                         conn.execute(
                             """
@@ -404,36 +516,36 @@ def ingest_from_filesystem(
                                    updated_ts = ?
                              WHERE id = ?
                             """,
-                            (rel, _iso_now(), row["id"]),
+                            (rel, _iso_now(), pid),
                         )
+                        _remember_aliases(pid, {slug})
                         stats["originals"] += 1
                     except sqlite3.Error:
                         pass
 
-    # 4) extracted/<slug>/doc.md → status 승격
+    # 4) extracted/<slug>-doc.md 및 extracted/<slug>/doc.md → status 승격
     extracted_dir = project_root / "extracted"
     if extracted_dir.is_dir():
         with connect(project_root) as conn:
+            docs: list[tuple[Path, str]] = []
+            for md in extracted_dir.glob("*-doc.md"):
+                docs.append((md, _strip_doc_suffix(md.stem)))
             for sub in extracted_dir.iterdir():
-                if not sub.is_dir():
-                    continue
-                doc = sub / "doc.md"
-                if not doc.exists():
-                    continue
+                if sub.is_dir() and (sub / "doc.md").exists():
+                    docs.append((sub / "doc.md", sub.name))
+            for doc, slug in docs:
                 rel = str(doc.relative_to(project_root)).replace("\\", "/")
-                slug = sub.name
-                row = None
-                try:
-                    cur = conn.execute(
-                        "SELECT id, title, year FROM papers"
-                    )
-                    for r in cur.fetchall():
-                        if _slug_from_title(r["title"], r["year"]) == slug:
-                            row = r
-                            break
-                except sqlite3.Error:
-                    pass
-                if row:
+                pid = _find_paper_id(conn, slug, doc.stem)
+                if pid is None:
+                    try:
+                        cur = conn.execute("SELECT id, title, year FROM papers")
+                        for r in cur.fetchall():
+                            if _slug_from_title(r["title"], r["year"]) == slug:
+                                pid = r["id"]
+                                break
+                    except sqlite3.Error:
+                        pass
+                if pid:
                     try:
                         conn.execute(
                             """
@@ -447,49 +559,42 @@ def ingest_from_filesystem(
                                    updated_ts = ?
                              WHERE id = ?
                             """,
-                            (rel, _iso_now(), row["id"]),
+                            (rel, _iso_now(), pid),
                         )
+                        _remember_aliases(pid, {slug, doc.stem})
                         stats["extracted"] += 1
                     except sqlite3.Error:
                         pass
 
-    # 5) agent-docs/summaries/*.json → summaries 테이블 + status=summarized
+    # 5) agent-docs/summaries/**/*.json → summaries 테이블 + status=summarized
     sum_dir = project_root / "agent-docs" / "summaries"
     if sum_dir.is_dir():
         with connect(project_root) as conn:
-            for sj in sum_dir.glob("*.json"):
+            for sj in sum_dir.rglob("*.json"):
                 try:
-                    s = _json.loads(sj.read_text(encoding="utf-8"))
-                except (OSError, _json.JSONDecodeError):
+                    s = json.loads(sj.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
                     continue
                 if not isinstance(s, dict):
                     continue
                 paper_id = s.get("paper_id") or sj.stem
-                # paper_id 가 papers 테이블에 없으면 slug 매칭
-                row = None
-                try:
-                    r = conn.execute(
-                        "SELECT id, title, year FROM papers WHERE id = ?",
-                        (paper_id,),
-                    ).fetchone()
-                    if r:
-                        row = r
-                    else:
-                        cur = conn.execute(
-                            "SELECT id, title, year FROM papers"
-                        )
+                pid = _find_paper_id(conn, str(paper_id), sj.stem)
+                if pid is None:
+                    try:
+                        cur = conn.execute("SELECT id, title, year FROM papers")
                         for r in cur.fetchall():
-                            if _slug_from_title(r["title"], r["year"]) == sj.stem:
-                                row = r
+                            if _slug_from_title(r["title"], r["year"]) in {
+                                sj.stem,
+                                _strip_doc_suffix(sj.stem),
+                            }:
+                                pid = r["id"]
                                 break
-                except sqlite3.Error:
-                    pass
-                if not row:
+                    except sqlite3.Error:
+                        pass
+                if not pid:
                     continue
-                content_md = s.get("summary_md") or _json.dumps(s, ensure_ascii=False)[:5000]
-                rfi_id = "unknown"  # summary 에 rfi 필드 있으면 우선
-                if s.get("rfi_id"):
-                    rfi_id = str(s["rfi_id"])
+                content_md = s.get("summary_md") or json.dumps(s, ensure_ascii=False)[:5000]
+                rfi_id = str(s.get("rfi_id") or _rfi_id_from_path(sj))
                 try:
                     conn.execute(
                         """
@@ -500,7 +605,7 @@ def ingest_from_filesystem(
                             model=excluded.model,
                             ts=excluded.ts
                         """,
-                        (row["id"], rfi_id, content_md, s.get("model"), _iso_now()),
+                        (pid, rfi_id, content_md, s.get("model"), _iso_now()),
                     )
                     conn.execute(
                         """
@@ -509,8 +614,9 @@ def ingest_from_filesystem(
                          WHERE id = ?
                            AND status NOT IN ('done')
                         """,
-                        (_iso_now(), row["id"]),
+                        (_iso_now(), pid),
                     )
+                    _remember_aliases(pid, {str(paper_id), sj.stem, _strip_doc_suffix(sj.stem)})
                     stats["summaries"] += 1
                 except sqlite3.Error:
                     pass
@@ -518,33 +624,27 @@ def ingest_from_filesystem(
     return stats
 
 
-if __name__ == "__main__":
-    import tempfile
-    from datetime import datetime, timezone
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="gui_lit SQLite cache utilities")
+    sub = ap.add_subparsers(dest="cmd", required=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / ".litproj").mkdir()
-        init_schema(root)
-        now = datetime.now(timezone.utc).isoformat()
-        upsert_paper(
-            root,
-            {
-                "id": "test-2024-smith",
-                "doi": "10.1234/test",
-                "title": "A diffusion test",
-                "authors": '["Smith, A.", "Kim, B."]',
-                "year": 2024,
-                "abstract": "We test diffusion artifacts in TTS.",
-                "source": "arxiv",
-                "status": "discovered",
-                "added_ts": now,
-                "updated_ts": now,
-            },
+    ingest = sub.add_parser("ingest", help="파일시스템에서 state.sqlite 재생성")
+    ingest.add_argument("project_root", type=Path)
+    ingest.add_argument("--rebuild", action="store_true", default=True)
+    ingest.add_argument("--no-rebuild", dest="rebuild", action="store_false")
+    ingest.add_argument("--verbose", action="store_true")
+
+    args = ap.parse_args(argv)
+    if args.cmd == "ingest":
+        stats = ingest_from_filesystem(
+            args.project_root,
+            rebuild=args.rebuild,
+            verbose=args.verbose,
         )
-        hits = search_papers(root, "diffusion")
-        print("search hits:", len(hits))
-        for h in hits:
-            print(" ", h["id"], "-", h["title"])
-        assert hits
-        print("OK")
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -40,10 +41,15 @@ def journal_path(project_root: Path) -> Path:
 
 
 def append_journal(project_root: Path, event: dict) -> dict:
-    """event 에 `ts` 자동 주입. 반환값은 실제 기록된 dict."""
+    """event 에 `ts` 자동 주입. 반환값은 실제 기록된 dict.
+
+    Head agent 및 템플릿은 journal 파일을 직접 append 하지 말고 이 함수를
+    거쳐야 한다. 입력 event 에 ts 가 있더라도 현재 시각으로 덮어써서 한 줄당
+    정확히 하나의 JSON 객체와 trailing newline 을 보장한다.
+    """
     path = journal_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"ts": _utc_iso(), **event}
+    record = {**event, "ts": _utc_iso()}
     line = json.dumps(record, ensure_ascii=False)
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
@@ -332,34 +338,43 @@ class IpcPaths:
         )
 
 
+def _load_event_arg(args: argparse.Namespace) -> dict:
+    if bool(args.event_json) == bool(args.event_file):
+        raise SystemExit("append-journal: --event-json 또는 --event-file 중 하나 필요")
+    if args.event_json:
+        raw = args.event_json
+    else:
+        raw = Path(args.event_file).read_text(encoding="utf-8")
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"append-journal: JSON 파싱 실패: {exc}") from exc
+    if not isinstance(event, dict):
+        raise SystemExit("append-journal: event 는 JSON object 여야 함")
+    event.pop("ts", None)
+    return event
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="gui_lit 파일 기반 IPC 유틸리티")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ap_append = sub.add_parser(
+        "append-journal",
+        help="journal.jsonl 에 안전하게 이벤트 한 줄 append",
+    )
+    ap_append.add_argument("project_root", type=Path)
+    ap_append.add_argument("--event-json", default=None)
+    ap_append.add_argument("--event-file", default=None)
+
+    args = ap.parse_args(argv)
+    if args.cmd == "append-journal":
+        event = _load_event_arg(args)
+        record = append_journal(args.project_root, event)
+        print(json.dumps(record, ensure_ascii=False))
+        return 0
+    return 2
+
+
 if __name__ == "__main__":
-    # 스모크 테스트
-    import tempfile as _tempfile
-
-    with _tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / ".litproj").mkdir()
-        (root / ".litproj" / "inbox").mkdir()
-
-        append_journal(root, {"actor": "test", "kind": "hello"})
-        drop_inbox_message(root, "첫 메시지")
-        drop_inbox_message(root, "둘째 메시지")
-        pending = list_pending_inbox(root)
-        assert len(pending) == 2, pending
-        mark_inbox_processed(root, pending[0])
-        assert len(list_pending_inbox(root)) == 1
-
-        j = read_journal(root)
-        print("journal rows:", len(j))
-        for ev in j:
-            print(" ", ev.get("kind"), "-", ev.get("content", ""))
-
-        write_current_session(root, "abc-123")
-        assert read_current_session(root) == "abc-123"
-
-        set_halt(root, "test")
-        assert is_halted(root)
-        clear_halt(root)
-        assert not is_halted(root)
-
-        print("OK")
+    raise SystemExit(main())

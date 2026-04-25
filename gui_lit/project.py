@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from gui_lit import ipc
+
 TEMPLATES = Path(__file__).parent / "templates"
 TEMPLATE_RENAMES = {
     "gitignore": ".gitignore",
@@ -215,7 +217,8 @@ def init_project(
             "runtime": "claude-code-cli",
             "model": "claude-opus-4-7",
         },
-        "search_sources": ["semantic_scholar", "arxiv"],
+        "domain_profile": "mixed",
+        "search_sources": ["semantic_scholar", "pubmed", "arxiv"],
         "review_depth": "section",
     }
     (root / ".litproj" / "config.json").write_text(
@@ -256,10 +259,7 @@ def init_project(
 
 
 def _append_journal(root: Path, event: dict) -> None:
-    path = root / ".litproj" / "journal.jsonl"
-    full = {"ts": datetime.now(timezone.utc).isoformat(), **event}
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(full, ensure_ascii=False) + "\n")
+    ipc.append_journal(root, event)
 
 
 # ── 최근 프로젝트 레지스트리 ──
