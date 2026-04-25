@@ -11,7 +11,12 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from codex_runner import CodexRunError, load_skill, run_skill
+from codex_runner import (
+    CodexRunError,
+    current_run_context,
+    load_skill,
+    run_skill,
+)
 
 from _lib.align import align_pages_batched
 from _lib.batching import compute_run_id
@@ -134,7 +139,37 @@ def run_pipeline(
     input_paths: list[Path],
     log_callback: Callable[[str], None] | None = None,
 ) -> dict[str, bytes]:
-    """Composite pipeline entry point. Returns {"note.md": bytes}."""
+    """Composite pipeline entry point. Returns {"note.md": bytes}.
+
+    Codex JSONL 로그 파일명에 끼어들 라벨(`lecture_note_<run_id 앞 8자>`) 을
+    `current_run_context` ContextVar 에 셋팅한 뒤 본체로 위임. 200+ Codex 호출
+    의 jsonl 파일이 어느 lecture_note run 에 속했는지 파일명만으로 추적 가능.
+    """
+    # 본체 진입 전 입력 검증 + run_id 계산을 미리 (ContextVar 초기 셋팅용).
+    pdfs_pre = [p for p in input_paths if p.suffix.lower() == ".pdf"]
+    txts_pre = [p for p in input_paths if p.suffix.lower() == ".txt"]
+    if not pdfs_pre:
+        raise CodexRunError("lecture_note: PDF 입력 필요 (1개 이상)")
+    if not txts_pre:
+        raise CodexRunError("lecture_note: transcript(.txt) 입력 필요 (1개 이상)")
+    run_id_for_ctx = compute_run_id(input_paths)
+    label = f"lecture_note_{run_id_for_ctx[:8]}"
+
+    token = current_run_context.set(label)
+    try:
+        return _run_pipeline_body(skill_dir, input_paths, log_callback)
+    finally:
+        current_run_context.reset(token)
+
+
+def _run_pipeline_body(
+    skill_dir: Path,
+    input_paths: list[Path],
+    log_callback: Callable[[str], None] | None = None,
+) -> dict[str, bytes]:
+    """run_pipeline 의 실제 12-step 본체. 내부 호출 전용 — 외부에서는
+    `run_pipeline` 사용. 시그니처 동일하게 유지해서 신호 처리/예외 전파에
+    영향 없음."""
 
     # 입력 순서 보존 (GUI의 FileOrderDialog가 이미 강의·교시 순서를 결정).
     pdfs = [p for p in input_paths if p.suffix.lower() == ".pdf"]

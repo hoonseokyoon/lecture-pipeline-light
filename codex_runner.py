@@ -19,9 +19,14 @@ prompt + input files (+ optional scripts) -> output files 구조.
 - Codex CLI 네이티브 설치 (예: `npm i -g @openai/codex`).
   `codex.cmd`/`codex.exe` 또는 `codex` 바이너리가 PATH 에 있거나, 환경변수
   `LECTURE_CODEX_PATH` 로 절대경로 지정. `codex auth login` 실행 필요.
-- `git` CLI 설치 (Codex `--full-auto` 는 작업 디렉토리가 git repo 일 것을 요구).
 - Python 3.10+ (venv_manager 가 각 스킬의 requirements.txt 를 자동 처리).
 - Claude fallback 을 사용하려면 WSL Ubuntu + Claude CLI 설치 필요.
+
+진단 로깅:
+- 매 Codex 호출마다 stdout JSONL 이벤트 스트림이 파싱되어 boot/ttft/work
+  타이밍과 token usage(`cached_input_tokens` 포함) 가 logger 로 emit 됨.
+- 동시에 raw JSONL 이 `~/.lecture-pipeline/codex_logs/<YYYY-MM-DD>/` 아래에
+  per-call 파일로 저장 (env `LECTURE_CODEX_LOG_DIR` 로 override, `=""` 로 비활성화).
 
 구조:
 - `CodexRunner` 클래스가 mutable 상태(semaphore/stagger/active_procs/cancel events/
@@ -48,6 +53,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +66,7 @@ from venv_manager import VenvManager
 logger = logging.getLogger("lecture_pipeline.codex_runner")
 
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_SERVICE_TIER = "fast"
 DEFAULT_TIMEOUT = 600
@@ -101,6 +107,14 @@ claude_only_mode: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # 필요 없음. 명시적으로 `run_codex_task(cancel_event=...)` 를 넘기면 그쪽이 우선.
 current_cancel_event: contextvars.ContextVar["threading.Event | None"] = (
     contextvars.ContextVar("current_cancel_event", default=None)
+)
+
+# 현재 실행 컨텍스트의 사람이 읽을 수 있는 라벨. composite skill 이 자기
+# run 을 식별할 수 있도록 (예: "lecture_note_a3f1c7d2") 셋팅하면 Codex JSONL
+# 로그 파일명에 prefix 로 끼워져서 사후 추적 가능. 미셋팅 시 prefix 없음.
+# ContextThreadPoolExecutor 로 자식 스레드 자동 전파.
+current_run_context: contextvars.ContextVar["str | None"] = contextvars.ContextVar(
+    "current_run_context", default=None,
 )
 
 
@@ -438,6 +452,122 @@ def _emit(log_callback: Callable[[str], None] | None, msg: str) -> None:
         pass  # 깨진 콜백이 재시도 본류를 망치지 않게
 
 
+class _CodexEventTracker:
+    """Codex `--json` 이벤트(JSONL) 스트림 파서.
+
+    한 번의 `codex exec` 호출 동안 stdout 한 줄씩 `feed_line()` 으로 받아서
+    타이밍 분해(boot / ttft / work)와 token usage 누적을 수행. 동시에 raw
+    line 을 (옵션) per-call JSONL 파일에 그대로 저장 — 사후 분석용.
+
+    이벤트 타입 ref: https://developers.openai.com/codex/noninteractive
+    - `thread.started`  : Rust 바이너리 로드 + auth + 모델 호출 직전
+    - `turn.started`    : 첫 SSE 도착 (TTFT 시점)
+    - `turn.completed`  : 모델 응답 완료. `usage` 필드에 토큰 정보.
+    """
+
+    def __init__(self, log_file=None):
+        self.log_file = log_file
+        self.t0 = time.monotonic()
+        self.first_thread_started: float | None = None
+        self.first_turn_started: float | None = None
+        self.last_turn_completed: float | None = None
+        self.input_tokens = 0
+        self.cached_input_tokens = 0
+        self.output_tokens = 0
+        self.turn_count = 0
+
+    def feed_line(self, line: str) -> None:
+        if self.log_file is not None:
+            try:
+                self.log_file.write(line)
+                self.log_file.flush()
+            except Exception:
+                pass
+        s = line.strip()
+        if not s:
+            return
+        try:
+            ev = json.loads(s)
+        except json.JSONDecodeError:
+            return
+        et = ev.get("type")
+        now = time.monotonic()
+        if et == "thread.started" and self.first_thread_started is None:
+            self.first_thread_started = now
+        elif et == "turn.started" and self.first_turn_started is None:
+            self.first_turn_started = now
+        elif et == "turn.completed":
+            self.last_turn_completed = now
+            self.turn_count += 1
+            usage = ev.get("usage") or {}
+            try:
+                self.input_tokens += int(usage.get("input_tokens") or 0)
+                self.cached_input_tokens += int(
+                    usage.get("cached_input_tokens") or 0
+                )
+                self.output_tokens += int(usage.get("output_tokens") or 0)
+            except (TypeError, ValueError):
+                pass
+
+    def summary(self, log_path: Path | None) -> str:
+        total_s = time.monotonic() - self.t0
+
+        def fmt(v: float | None) -> str:
+            return f"{v:.1f}s" if v is not None else "?"
+
+        boot_s = (
+            self.first_thread_started - self.t0
+            if self.first_thread_started is not None
+            else None
+        )
+        ttft_s = (
+            self.first_turn_started - self.first_thread_started
+            if (self.first_turn_started is not None
+                and self.first_thread_started is not None)
+            else None
+        )
+        work_s = (
+            self.last_turn_completed - self.first_turn_started
+            if (self.last_turn_completed is not None
+                and self.first_turn_started is not None)
+            else None
+        )
+        cache_pct = (
+            self.cached_input_tokens / self.input_tokens * 100
+            if self.input_tokens > 0 else 0.0
+        )
+        msg = (
+            f"[codex-timing] total={total_s:.1f}s boot={fmt(boot_s)} "
+            f"ttft={fmt(ttft_s)} work={fmt(work_s)} "
+            f"turns={self.turn_count} "
+            f"in={self.input_tokens} cached={self.cached_input_tokens} "
+            f"({cache_pct:.0f}%) out={self.output_tokens}"
+        )
+        if log_path is not None:
+            msg += f" log={log_path}"
+        return msg
+
+
+def _resolve_codex_log_dir() -> Path | None:
+    """Codex JSONL 이벤트 덤프 디렉토리 결정.
+
+    - 미지정: `~/.lecture-pipeline/codex_logs/<YYYY-MM-DD>/` (default-on)
+    - `LECTURE_CODEX_LOG_DIR` 환경변수: 절대경로 override
+    - `LECTURE_CODEX_LOG_DIR=""` (빈 문자열): 비활성화
+
+    Returns:
+        디렉토리 Path 또는 None (비활성화).
+    """
+    override = os.environ.get("LECTURE_CODEX_LOG_DIR")
+    if override is not None:
+        if override == "":
+            return None
+        base = Path(override)
+    else:
+        base = Path.home() / ".lecture-pipeline" / "codex_logs"
+    return base / time.strftime("%Y-%m-%d")
+
+
 # ---------------------------------------------------------------------------
 # CodexRunner — mutable 상태 캡슐화
 # ---------------------------------------------------------------------------
@@ -514,11 +644,7 @@ class CodexRunner:
         return None
 
     def _check_host_prereqs(self) -> None:
-        """git, codex 존재 여부 경고. 실패해도 인스턴스 생성은 성공."""
-        if shutil.which("git") is None:
-            logger.warning(
-                "git CLI 를 찾을 수 없음 — Codex --full-auto 는 git 필요"
-            )
+        """codex 존재 여부 경고. 실패해도 인스턴스 생성은 성공."""
         if self._codex_binary is None:
             logger.warning(
                 "Codex CLI 를 찾을 수 없음 — `npm i -g @openai/codex` 설치 또는 "
@@ -638,17 +764,56 @@ class CodexRunner:
         kind: str,
         cwd: str | None = None,
         env: dict | None = None,
+        on_stdout_line: Callable[[str], None] | None = None,
     ) -> tuple[int, str, str]:
-        """Tracked Popen + communicate 헬퍼.
+        """Tracked Popen 헬퍼.
 
         - encoding="utf-8", errors="replace" 강제 (cp949 이슈 방지)
         - 실행 중 active_procs 에 등록 → terminate_all_active 로 kill 가능
         - 타임아웃 시 프로세스 kill 후 CodexRunError raise
         - env: 미지정 시 현재 프로세스 환경 상속 (Popen 기본 동작).
+        - on_stdout_line: 지정 시 stdout 을 라인 단위로 reader thread 가 읽어
+          매 라인을 즉시 전달 (Codex `--json` 이벤트 스트림 처리용). 미지정 시
+          `communicate()` 한 방으로 끝까지 받음 (기존 동작).
 
         Returns:
             (returncode, stdout, stderr)
         """
+        if on_stdout_line is None:
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=cwd,
+                    env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except FileNotFoundError as exc:
+                raise CodexRunError(
+                    f"{kind}: 실행 파일을 찾을 수 없음 ({cmd[0]!r})"
+                ) from exc
+
+            self._register_proc(proc)
+            try:
+                try:
+                    stdout, stderr = proc.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                        proc.communicate()
+                    except Exception:
+                        pass
+                    raise CodexRunError(f"{kind} 타임아웃 ({timeout}s)")
+            finally:
+                self._unregister_proc(proc)
+
+            return proc.returncode, stdout or "", stderr or ""
+
+        # 라인 단위 reader thread 경로 — Codex `--json` JSONL 스트림 처리.
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -657,6 +822,7 @@ class CodexRunner:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                bufsize=1,  # line-buffered (Python 측)
                 cwd=cwd,
                 env=env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -667,20 +833,52 @@ class CodexRunner:
             ) from exc
 
         self._register_proc(proc)
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def _read_stdout() -> None:
+            try:
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    stdout_chunks.append(line)
+                    try:
+                        on_stdout_line(line)
+                    except Exception:
+                        pass  # 콜백 깨져도 본류 영향 없음
+            except Exception:
+                pass
+
+        def _read_stderr() -> None:
+            try:
+                for line in proc.stderr:  # type: ignore[union-attr]
+                    stderr_chunks.append(line)
+            except Exception:
+                pass
+
+        out_thread = threading.Thread(target=_read_stdout, daemon=True)
+        err_thread = threading.Thread(target=_read_stderr, daemon=True)
+        out_thread.start()
+        err_thread.start()
+
         try:
             try:
-                stdout, stderr = proc.communicate(timeout=timeout)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
                     proc.kill()
-                    proc.communicate()
+                    proc.wait()
                 except Exception:
                     pass
+                out_thread.join(timeout=2)
+                err_thread.join(timeout=2)
                 raise CodexRunError(f"{kind} 타임아웃 ({timeout}s)")
         finally:
             self._unregister_proc(proc)
 
-        return proc.returncode, stdout or "", stderr or ""
+        out_thread.join(timeout=5)
+        err_thread.join(timeout=5)
+
+        return proc.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
     # ── Claude CLI fallback ──
 
@@ -920,34 +1118,24 @@ class CodexRunner:
                         "LECTURE_CODEX_PATH 환경변수로 절대경로 지정."
                     )
 
-                # Codex --full-auto 는 작업 디렉토리가 git repo 일 것을 요구.
-                try:
-                    subprocess.run(
-                        ["git", "init", "-q"],
-                        cwd=str(workdir),
-                        check=True,
-                        capture_output=True,
-                        creationflags=getattr(
-                            subprocess, "CREATE_NO_WINDOW", 0
-                        ),
-                    )
-                except FileNotFoundError as exc:
-                    raise CodexRunError(
-                        "git CLI 를 찾을 수 없음 — Codex --full-auto 는 git 필요"
-                    ) from exc
-                except subprocess.CalledProcessError as exc:
-                    tail = (exc.stderr or exc.stdout or b"")[-500:]
-                    raise CodexRunError(
-                        f"git init 실패 (exit={exc.returncode}):\n"
-                        f"{tail.decode('utf-8', errors='replace')}"
-                    ) from exc
-
                 argv: list[str] = [str(self._codex_binary), "exec"]
                 argv.extend(["-c", f"model={model}"])
                 argv.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
                 if service_tier and service_tier != "default":
                     argv.extend(["-c", f"service_tier={service_tier}"])
                 argv.append("--full-auto")  # 샌드박스 유지
+                # 1) tmpdir 마다 `git init` 강제 회피. 우리 workdir 은 항상
+                #    1회용이라 git repo 일 필요 없음.
+                argv.append("--skip-git-repo-check")
+                # 2) 세션 디스크 저장 비활성화 — 병렬 인스턴스가 ~/.codex/
+                #    sessions/ 를 공유하면서 서로의 컨텍스트를 잘못 복원하는
+                #    알려진 race (issue #11435) 회피. 우리는 자체 checkpoint
+                #    파일로 재실행 이어가므로 codex 세션 resume 도 안 씀.
+                argv.append("--ephemeral")
+                # 3) JSONL 이벤트 스트림 — 진단용 (boot/ttft/work 분해 +
+                #    cached_input_tokens 가시화). reader thread 가 라인 단위
+                #    파싱.
+                argv.append("--json")
                 if network_access:
                     # workspace-write 샌드박스의 기본은 네트워크 차단. 스킬이
                     # 외부 API (예: Gemini) 를 호출해야 하면 이 플래그를 켜야 함.
@@ -961,16 +1149,55 @@ class CodexRunner:
                     "Read prompt.txt and execute the task described there."
                 )
 
+                # JSONL 덤프 파일 준비 (옵션). default-on, env 로 비활성화 가능.
+                # 파일명에 current_run_context (예: "lecture_note_a3f1c7d2") 가
+                # 끼어들면 200+ 호출이 어느 composite run 에 속했는지 파일명만
+                # 으로 구분 가능.
+                log_dir = _resolve_codex_log_dir()
+                log_path: Path | None = None
+                log_file = None
+                if log_dir is not None:
+                    try:
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        ts = time.strftime("%H%M%S")
+                        short = uuid.uuid4().hex[:8]
+                        ctx_label = current_run_context.get()
+                        if ctx_label:
+                            safe_ctx = re.sub(r"[^A-Za-z0-9._-]", "_", ctx_label)
+                            fname = f"{ts}_{safe_ctx}_{os.getpid()}_{short}.jsonl"
+                        else:
+                            fname = f"{ts}_{os.getpid()}_{short}.jsonl"
+                        log_path = log_dir / fname
+                        log_file = open(log_path, "w", encoding="utf-8")
+                    except OSError as exc:
+                        logger.warning(
+                            "Codex JSONL 로그 파일 열기 실패: %s — 로깅 건너뜀",
+                            exc,
+                        )
+                        log_path = None
+                        log_file = None
+
+                tracker = _CodexEventTracker(log_file=log_file)
+
                 self._stagger_wait()
                 codex_error: CodexRunError | None = None
-                with self.semaphore:
-                    rc, stdout, stderr = self._run_tracked(
-                        cmd=argv,
-                        timeout=timeout,
-                        kind="Codex 실행",
-                        cwd=str(workdir),
-                        env=codex_env,
-                    )
+                try:
+                    with self.semaphore:
+                        rc, stdout, stderr = self._run_tracked(
+                            cmd=argv,
+                            timeout=timeout,
+                            kind="Codex 실행",
+                            cwd=str(workdir),
+                            env=codex_env,
+                            on_stdout_line=tracker.feed_line,
+                        )
+                finally:
+                    if log_file is not None:
+                        try:
+                            log_file.close()
+                        except Exception:
+                            pass
+                    logger.info(tracker.summary(log_path))
 
                 if rc != 0:
                     tail = (stderr or stdout or "")[-500:]
