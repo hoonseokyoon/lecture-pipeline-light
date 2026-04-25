@@ -26,7 +26,7 @@
 | 모드 | 트리거 예시 | 당신의 행동 |
 |---|---|---|
 | **💬 대화 모드** | 질문 / 의견 요청 / 피드백 / 설명 / 조언 요청<br>• "PIR 초안 어때?"<br>• "diffusion TTS 가 뭐야?"<br>• "지금 어느 RFI 에 있지?"<br>• "RFI-0001 의 접근법에 대한 의견?"<br>• "이 논문 요약 한 줄로 줘"<br>• "다음에 뭘 해야 할까?" | **가볍게** 답:<br>• inbox 새 메시지만 pickup (processed/ 로 이동)<br>• 답에 필요한 파일만 선택적 Read (PIR·RFI 대상이면 그것만)<br>• git log / full journal tail / branch 전환 **생략**<br>• commit 없음<br>• 응답 후 그대로 턴 종료 |
-| **🔧 작업 모드** | 명시적 작업 지시<br>• `/rfi-open <제목>`, `/rfi-close`, `/lit-triage`, `/compile-review`<br>• 자연어지만 의도 뚜렷: "검색 시작해줘", "요약 다시 돌려", "main 에 머지" | **전체 프로토콜** 수행:<br>• 아래 "세션 진입 프로토콜" + "세션 내 턴 프로토콜" 대로<br>• 필요 브랜치 전환, 외주 스킬 호출, journal 이벤트 기록, commit |
+| **🔧 작업 모드** | 명시적 작업 지시<br>• `/rfi-open <제목>`, `/rfi-followup <RFI-id> <주제>`, `/rfi-close`, `/lit-triage`, `/compile-review`<br>• 자연어지만 의도 뚜렷: "검색 시작해줘", "요약 다시 돌려", "main 에 머지" | **전체 프로토콜** 수행:<br>• 아래 "세션 진입 프로토콜" + "세션 내 턴 프로토콜" 대로<br>• 필요 브랜치 전환, 외주 스킬 호출, journal 이벤트 기록, commit |
 | **❓ 애매** | "이 PIR 로 가도 될까?" (의견? 작업 승인?) | **먼저 물어봐라**: "의견만 드릴까요, 아니면 OO 작업을 지금 실행할까요?" 사용자 답 후 해당 모드로. |
 
 **대화 모드 기본자세**:
@@ -44,8 +44,8 @@
 아래 프로토콜은 **작업 모드** 용입니다. **대화 모드** 의 첫 턴이라면 이 중
 1~3 만 가볍게 (PIR 읽는 것 정도).
 
-모든 RFI 수행 세션은 **RFI 당 1개** 입니다. 작업 모드로 진입하면 반드시 다음을
-순서대로 수행:
+모든 RFI 수행 세션은 **RFI 또는 follow-up 당 1개** 입니다. 작업 모드로
+진입하면 반드시 다음을 순서대로 수행:
 
 1. `PRIORITY_OF_INTELLIGENCE.md` 전체 읽기 — 프로젝트 mission·scope 확인
 2. `REQUEST_FOR_INFORMATION.md` 읽기 — 현재 active RFI 이해
@@ -99,6 +99,7 @@
     ├── config.json             # 프로젝트 설정
     ├── journal.jsonl           # 의사결정 이벤트 로그 (append-only, track)
     ├── sessions/               # 세션별 transcript 아카이브 (track)
+    ├── followups/              # RFI follow-up query/run metadata (track)
     ├── inbox/                  # 사용자 → Head 비동기 메시지
     ├── state.sqlite            # 논문 메타 DB (gitignore, 재생성 가능)
     └── index/                  # 임베딩 (gitignore)
@@ -117,6 +118,7 @@
 | `lit_summarize` | `python $LIT_HARNESS_ROOT/run_skill.py lit_summarize <doc.md 또는 candidate.json>...` | per-paper 요약 (abstract-only 가능) |
 | `second_opinion` | `python $LIT_HARNESS_ROOT/run_skill.py second_opinion <review.md> --out agent-docs/second-opinions` | Codex 로 당신 산출물을 독립 평가 |
 | Codex 직접 | `codex exec --model gpt-5.4 "<prompt>"` | 간단한 대안 관점 (구조화 X) |
+| follow-up | `python -m gui_lit.followup open . --rfi <id> --topic "<topic>" ...` | 닫힌 RFI 아래 addendum 조사 턴 생성 |
 | DB rebuild | `python -m gui_lit.db ingest . --rebuild --verbose` | 파일시스템 기준 state.sqlite 재생성 |
 | doctor | `python -m gui_lit.doctor .` | close 전 무결성 검사 |
 | sqlite CLI | `sqlite3 .litproj/state.sqlite "<sql>"` | DB 직접 쿼리 |
@@ -150,6 +152,7 @@ journal 에 `kind: "second_opinion_requested" | "second_opinion_received"` 기�
 
 - `main`: PIR 수준 안정 상태. 직접 커밋 금지.
 - `rfi/<id>-<slug>`: 각 RFI 의 feature branch. 모든 작업은 여기서.
+- `rfi/<id>-followup-<fu-id>-<slug>`: 닫힌 RFI 의 addendum 작업 branch.
 - RFI 완료 시 사용자 승인 후 main 에 머지.
 - 실패·보류 RFI 는 branch 유지, 필요시 나중에 되살림.
 
@@ -165,6 +168,7 @@ journal 에 `kind: "second_opinion_requested" | "second_opinion_received"` 기�
 주요 `kind`:
 - `session_start`, `session_end`
 - `rfi_opened`, `rfi_closed`, `rfi_status_changed`
+- `rfi_followup_opened`, `rfi_followup_closed`
 - `subagent_called`, `subagent_returned`
 - `decision` — 당신의 판단·근거
 - `user_message` — inbox 에서 픽업한 사용자 메시지
@@ -192,6 +196,29 @@ CLI 가 timestamp 와 trailing newline 을 보장합니다. 이게 당신의 **�
   넣지 마세요.
 - RFI close 전 반드시 `python -m gui_lit.doctor .` 와
   `python -m gui_lit.db ingest . --rebuild --verbose` 를 통과시키세요.
+
+## RFI Follow-up / Addendum 운영
+
+닫힌 RFI 에 조건부 추가조사를 얹을 때 새 RFI 번호를 만들지 않습니다. 기존
+RFI 아래에 `fu-001`, `fu-002` 같은 follow-up 을 생성하고 addendum 으로
+근거를 축적합니다.
+
+사용 기준:
+- 기존 RFI 의 특정 claim/gap/critique 를 보강하면 `/rfi-followup`.
+- PIR 수준의 새 질문이면 `/rfi-open`.
+- follow-up 이 너무 커져 독립 scope 가 되면 새 RFI 로 승격.
+
+절차:
+1. 기존 RFI archive, review, second_opinion, claim/candidate 자료를 읽습니다.
+2. `python -m gui_lit.followup open . --rfi <id> --topic "<topic>" ...` 로
+   follow-up 파일과 query_plan 을 생성합니다.
+3. 생성된 `.litproj/followups/<id>/<fu-id>-<slug>/query_plan.json` 으로 검색합니다.
+4. 산출물은 먼저 `agent-docs/reviews/rfi-<id>-<fu-id>-<slug>-addendum.md` 와
+   `...-claim-matrix.json` 으로 둡니다. 원 review 를 바로 덮어쓰지 마세요.
+5. addendum 이 기존 결론을 유지/강화/약화/수정하는지 명시하고 병합 여부를
+   `Merge Recommendation` 에 씁니다.
+6. `python -m gui_lit.doctor .` 통과 후 `python -m gui_lit.followup close ...`
+   로 닫고 커밋합니다.
 
 ## 미획득 논문 처리 정책 (Hybrid workflow)
 

@@ -295,6 +295,119 @@ def check_review_lint(root: Path) -> list[Finding]:
     return findings
 
 
+def check_followups(root: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    rfi_root = root / "agent-docs" / "rfi"
+    if not rfi_root.is_dir():
+        return findings
+    for path in rfi_root.glob("????-*/followups/fu-*.md"):
+        fm = _front_matter(path)
+        rfi_id = fm.get("rfi")
+        followup_id = fm.get("followup_id")
+        slug = fm.get("slug")
+        status = fm.get("status")
+        missing = [
+            key for key in ("rfi", "followup_id", "slug", "status", "query_plan")
+            if not fm.get(key)
+        ]
+        if missing:
+            findings.append(
+                Finding(
+                    "error",
+                    "followup_front_matter",
+                    _rel(path, root),
+                    f"필수 front matter 누락: {', '.join(missing)}",
+                )
+            )
+            continue
+        if followup_id and not re.match(r"fu-\d{3}$", followup_id):
+            findings.append(
+                Finding(
+                    "error",
+                    "followup_id",
+                    _rel(path, root),
+                    f"followup_id 형식 오류: {followup_id}",
+                )
+            )
+        archive = next((root / "agent-docs" / "rfi").glob(f"{rfi_id}-*.md"), None)
+        if archive is None:
+            findings.append(
+                Finding("error", "followup_rfi_missing", _rel(path, root), f"parent RFI 없음: {rfi_id}")
+            )
+        qp = root / fm["query_plan"]
+        if not qp.exists():
+            findings.append(
+                Finding("error", "followup_query_plan_missing", _rel(path, root), fm["query_plan"])
+            )
+        else:
+            try:
+                qdata = json.loads(qp.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                findings.append(
+                    Finding("error", "followup_query_plan_json", _rel(qp, root), f"파싱 실패: {exc}")
+                )
+            else:
+                for key in ("rfi", "followup_id", "query", "domain_profile"):
+                    if not qdata.get(key):
+                        findings.append(
+                            Finding(
+                                "error",
+                                "followup_query_plan_shape",
+                                _rel(qp, root),
+                                f"{key} 누락",
+                            )
+                        )
+                if qdata.get("rfi") != rfi_id or qdata.get("followup_id") != followup_id:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "followup_query_plan_mismatch",
+                            _rel(qp, root),
+                            "follow-up front matter 와 query_plan 의 rfi/followup_id 불일치",
+                        )
+                    )
+        if status == "done":
+            addendum = fm.get("addendum")
+            claim_matrix = fm.get("claim_matrix")
+            if not addendum or not (root / addendum).exists():
+                findings.append(
+                    Finding(
+                        "error",
+                        "followup_addendum_missing",
+                        _rel(path, root),
+                        "done follow-up 은 addendum 파일이 필요",
+                    )
+                )
+            if claim_matrix and not (root / claim_matrix).exists():
+                findings.append(
+                    Finding(
+                        "warning",
+                        "followup_claim_matrix_missing",
+                        _rel(path, root),
+                        "claim_matrix 파일 없음",
+                    )
+                )
+        elif status not in {"researching", "done", "abandoned"}:
+            findings.append(
+                Finding(
+                    "warning",
+                    "followup_status",
+                    _rel(path, root),
+                    f"알 수 없는 follow-up status: {status}",
+                )
+            )
+        if slug and followup_id and path.name != f"{followup_id}-{slug}.md":
+            findings.append(
+                Finding(
+                    "warning",
+                    "followup_filename",
+                    _rel(path, root),
+                    "파일명과 followup_id/slug front matter 가 다름",
+                )
+            )
+    return findings
+
+
 def run_checks(root: Path) -> list[Finding]:
     root = root.resolve()
     findings: list[Finding] = []
@@ -302,6 +415,7 @@ def run_checks(root: Path) -> list[Finding]:
     findings.extend(check_rfi_pointer(root))
     findings.extend(check_candidates(root))
     findings.extend(check_review_lint(root))
+    findings.extend(check_followups(root))
     return findings
 
 

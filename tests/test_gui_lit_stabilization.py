@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from codex_runner import CodexRunError
-from gui_lit import db, doctor, ipc
+from gui_lit import db, doctor, followup, ipc
 
 
 class GuiLitStabilizationTests(unittest.TestCase):
@@ -231,6 +231,72 @@ class GuiLitStabilizationTests(unittest.TestCase):
             self.assertIn("claim-matrix.json", mapped)
             self.assertIn("candidates.json", mapped)
             self.assertIn("triaged.json", mapped)
+
+    def test_rfi_followup_open_close_and_doctor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent-docs" / "rfi").mkdir(parents=True)
+            (root / "agent-docs" / "reviews").mkdir(parents=True)
+            (root / ".litproj").mkdir()
+            (root / "agent-docs" / "rfi" / "0001-promoter-biology.md").write_text(
+                """---
+id: "0001"
+slug: "promoter-biology"
+status: "done"
+---
+
+# RFI-0001
+""",
+                encoding="utf-8",
+            )
+
+            paths = followup.open_followup(
+                root,
+                rfi_id="0001",
+                topic="cross host evidence",
+                question="B. subtilis portability 근거 보강",
+                domain_profile="biomed",
+                priority="high",
+                must_address=["non-E. coli full-text evidence"],
+            )
+            self.assertTrue(paths.followup_file.exists())
+            self.assertTrue(paths.query_plan.exists())
+            q = json.loads(paths.query_plan.read_text(encoding="utf-8"))
+            self.assertEqual(q["followup_id"], "fu-001")
+            self.assertEqual(q["domain_profile"], "biomed")
+            self.assertFalse(doctor.check_followups(root))
+
+            paths.addendum.write_text("# Addendum\n\n## References\n", encoding="utf-8")
+            paths.claim_matrix.write_text(json.dumps({"claims": []}), encoding="utf-8")
+            followup.close_followup(
+                root,
+                rfi_id="0001",
+                followup_id="fu-001",
+                outcome="보강 완료",
+            )
+            self.assertFalse(doctor.check_followups(root))
+            items = followup.list_followups(root, rfi_id="0001")
+            self.assertEqual(items[0]["status"], "done")
+
+    def test_rfi_followup_done_requires_addendum(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent-docs" / "rfi").mkdir(parents=True)
+            (root / "agent-docs" / "rfi" / "0001-promoter-biology").mkdir(parents=True)
+            (root / "agent-docs" / "rfi" / "0001-promoter-biology.md").write_text(
+                """---
+id: "0001"
+slug: "promoter-biology"
+status: "done"
+---
+# RFI
+""",
+                encoding="utf-8",
+            )
+            paths = followup.open_followup(root, rfi_id="0001", topic="gap")
+            followup.close_followup(root, rfi_id="0001", followup_id="fu-001")
+            codes = {f.code for f in doctor.check_followups(root)}
+            self.assertIn("followup_addendum_missing", codes)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@
 
 - `PRIORITY_OF_INTELLIGENCE.md` — 프로젝트 mission·scope·PIR
 - `REQUEST_FOR_INFORMATION.md` — 현재 active RFI
+- `agent-docs/rfi/<id>-<slug>/followups/` — 닫힌 RFI 의 조건부 추가조사
+  addendum 턴
 - `AGENTS.md` — Head agent 영속 지시서 (편집 주의)
 - `user-docs/` — 사용자 작성 자료
 - `agent-docs/` — Head agent 산출물 (reviews/summaries/study)
@@ -35,6 +37,18 @@ streamlit run gui_lit/app.py -- --project /path/to/this-project
 
 Claude Code CLI 와 Codex CLI 는 각자 `claude auth login` / `codex auth login`
 으로 개별 인증.
+
+## RFI follow-up
+
+닫힌 RFI 의 특정 gap 만 보강할 때는 새 RFI 를 만들지 말고 follow-up 을 엽니다.
+
+```bash
+python -m gui_lit.followup open . --rfi 0001 --topic "cross-host evidence" \
+  --question "B. subtilis / P. aeruginosa promoter portability 근거 보강" \
+  --domain-profile biomed
+```
+
+생성된 addendum 은 원 리뷰와 분리된 파일로 검토한 뒤 필요할 때 병합합니다.
 
 ## 저작권 주의
 

@@ -168,6 +168,8 @@ EVENT_META: dict[str, dict] = {
     "rfi_opened":        {"icon": "🎯", "role": "middle",    "label": "RFI opened"},
     "rfi_closed":        {"icon": "🏁", "role": "middle",    "label": "RFI closed"},
     "rfi_status_changed":{"icon": "🔄", "role": "middle",    "label": "RFI status"},
+    "rfi_followup_opened": {"icon": "🧭", "role": "middle", "label": "RFI follow-up"},
+    "rfi_followup_closed": {"icon": "🏁", "role": "middle", "label": "Follow-up closed"},
     "review_images_embedded": {"icon": "🖼", "role": "middle", "label": "Images"},
     "second_opinion_requested":{"icon": "🔍", "role": "middle", "label": "2nd opinion"},
     "second_opinion_received": {"icon": "📋", "role": "middle", "label": "2nd opinion"},
@@ -226,6 +228,12 @@ def summarize_event(ev: dict) -> str:
         rfi = ev.get("rfi", "")
         title = ev.get("title", "")
         return f"RFI-{rfi} {title}".strip()
+
+    if kind in ("rfi_followup_opened", "rfi_followup_closed"):
+        rfi = ev.get("rfi", "")
+        fu = ev.get("followup", "")
+        topic = ev.get("topic") or ev.get("status") or ""
+        return f"RFI-{rfi} {fu} {topic}".strip()
 
     # fallback
     if content:

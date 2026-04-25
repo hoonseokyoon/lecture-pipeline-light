@@ -263,13 +263,14 @@ with st.expander("빠른 액션 (작업 모드 전용)", expanded=False):
         "이 버튼들은 즉시 파이프라인을 가동시킵니다. 단순 질문·의견은 "
         "위 입력창에 자연어로 입력하세요 — 에이전트가 대화 모드로 처리합니다."
     )
-    cols = st.columns(4)
     quick_actions = [
         ("/rfi-open", "새 RFI 시작 (제목 제시가 필요하면 말미에 덧붙일 것)"),
+        ("/rfi-followup", "기존 RFI에 조건부 추가조사/addendum 생성"),
         ("/rfi-close", "현재 RFI 마무리"),
         ("/lit-triage", "최근 검색 결과 triage"),
         ("/compile-review", "리뷰 문서 생성"),
     ]
+    cols = st.columns(len(quick_actions))
     for idx, (cmd, desc) in enumerate(quick_actions):
         if cols[idx].button(
             cmd, help=desc, use_container_width=True, disabled=is_running,

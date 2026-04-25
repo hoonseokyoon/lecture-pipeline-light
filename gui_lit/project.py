@@ -10,12 +10,13 @@
     ├── .gitignore, .gitattributes
     ├── .claude/
     │   ├── settings.json
-    │   └── skills/{rfi-open, rfi-close, lit-triage, compile-review}/SKILL.md
+    │   └── skills/{rfi-open, rfi-followup, rfi-close, lit-triage, compile-review}/SKILL.md
     ├── .litproj/
     │   ├── config.json
     │   ├── journal.jsonl    (0 bytes, 이후 append)
     │   ├── inbox/           (빈 디렉토리)
-    │   └── sessions/        (빈 디렉토리)
+    │   ├── sessions/        (빈 디렉토리)
+    │   └── followups/       (RFI addendum run metadata)
     ├── user-docs/
     ├── agent-docs/{reviews,summaries,study,rfi}/
     ├── originals/{papers,search}/
@@ -186,6 +187,7 @@ def init_project(
         ".litproj/inbox",
         ".litproj/inbox/processed",
         ".litproj/sessions",
+        ".litproj/followups",
     ):
         (root / sub).mkdir(parents=True, exist_ok=True)
 
@@ -204,6 +206,7 @@ def init_project(
         "extracted",
         "scripts",
         ".litproj/sessions",
+        ".litproj/followups",
     ):
         (root / empty_dir / ".gitkeep").touch()
 

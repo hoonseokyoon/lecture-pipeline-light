@@ -84,6 +84,11 @@ streamlit run gui_lit/app.py
 
 6. RFI 완료 시 Chat 에서 `/rfi-close` → 사용자 승인 후 main 머지.
 
+7. 닫힌 RFI 의 특정 gap 을 보강하려면 `/rfi-followup <RFI-id> <topic>` 으로
+   addendum 턴을 엽니다. 새 RFI 번호를 만들지 않고
+   `agent-docs/rfi/<id>-<slug>/followups/` 와 `.litproj/followups/` 아래에
+   조건부 추가조사 기록을 남깁니다.
+
 ## 파일 구조
 
 ```
@@ -106,7 +111,7 @@ gui_lit/
     ├── README.md
     ├── gitignore, gitattributes
     ├── claude_settings.json
-    └── claude_skills/{rfi-open,rfi-close,lit-triage,compile-review}/
+    └── claude_skills/{rfi-open,rfi-followup,rfi-close,lit-triage,compile-review}/
 ```
 
 ## 트러블슈팅
@@ -149,3 +154,4 @@ gui_lit/
 - 벡터 검색 (sqlite-vss 또는 Chroma 통합)
 - UI: 후보 논문 다중선택 triage, markdown 리뷰 인라인 편집기
 - 세션 rotate / archive 자동화
+- 닫힌 RFI follow-up/addendum UI 고도화
