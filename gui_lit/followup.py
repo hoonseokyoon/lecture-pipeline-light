@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import textwrap
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +99,33 @@ def _run_root(project_root: Path, rfi_id: str, followup_id: str, slug: str) -> P
     return Path(project_root) / ".litproj" / "followups" / rfi_id / f"{followup_id}-{slug}"
 
 
+
+@contextmanager
+def _followup_open_lock(project_root: Path):
+    """Serialize follow-up id allocation across concurrent CLI calls."""
+    lock_dir = Path(project_root) / ".litproj" / "followups"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".open.lock"
+    deadline = time.monotonic() + 30.0
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"pid={os.getpid()} ts={_utc_iso()}\n".encode("utf-8"))
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise FollowupError(f"follow-up open lock timeout: {lock_path}")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
 def _next_followup_id(followups_dir: Path) -> str:
     max_n = 0
     if followups_dir.is_dir():
@@ -133,93 +164,94 @@ def open_followup(
     followups_dir = _followup_root(archive)
     followups_dir.mkdir(parents=True, exist_ok=True)
 
-    followup_id = _next_followup_id(followups_dir)
-    slug = _slugify(slug or topic)
-    run_dir = _run_root(root, rfi_id, followup_id, slug)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    with _followup_open_lock(root):
+        followup_id = _next_followup_id(followups_dir)
+        slug = _slugify(slug or topic)
+        run_dir = _run_root(root, rfi_id, followup_id, slug)
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-    followup_file = followups_dir / f"{followup_id}-{slug}.md"
-    if followup_file.exists():
-        raise FollowupError(f"follow-up 파일이 이미 존재함: {followup_file}")
-    addendum = root / "agent-docs" / "reviews" / f"rfi-{rfi_id}-{followup_id}-{slug}-addendum.md"
-    claim_matrix = root / "agent-docs" / "reviews" / f"rfi-{rfi_id}-{followup_id}-{slug}-claim-matrix.json"
-    query_plan = run_dir / "query_plan.json"
+        followup_file = followups_dir / f"{followup_id}-{slug}.md"
+        if followup_file.exists():
+            raise FollowupError(f"follow-up 파일이 이미 존재함: {followup_file}")
+        addendum = root / "agent-docs" / "reviews" / f"rfi-{rfi_id}-{followup_id}-{slug}-addendum.md"
+        claim_matrix = root / "agent-docs" / "reviews" / f"rfi-{rfi_id}-{followup_id}-{slug}-claim-matrix.json"
+        query_plan = run_dir / "query_plan.json"
 
-    must_address = must_address or []
-    now = _utc_iso()
-    query_plan.write_text(
-        json.dumps(
-            {
-                "rfi": rfi_id,
-                "rfi_slug": rfi_slug,
-                "followup_id": followup_id,
-                "topic": topic,
-                "query": question or topic,
-                "domain_profile": domain_profile,
-                "priority": priority,
-                "must_address": must_address,
-                "outputs": {
-                    "addendum": _relative(addendum, root),
-                    "claim_matrix": _relative(claim_matrix, root),
+        must_address = must_address or []
+        now = _utc_iso()
+        query_plan.write_text(
+            json.dumps(
+                {
+                    "rfi": rfi_id,
+                    "rfi_slug": rfi_slug,
+                    "followup_id": followup_id,
+                    "topic": topic,
+                    "query": question or topic,
+                    "domain_profile": domain_profile,
+                    "priority": priority,
+                    "must_address": must_address,
+                    "outputs": {
+                        "addendum": _relative(addendum, root),
+                        "claim_matrix": _relative(claim_matrix, root),
+                    },
                 },
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
-    must_lines = "\n".join(f"- {x}" for x in must_address) or "- (조사 중 구체화)"
-    body = f"""---
-rfi: "{rfi_id}"
-rfi_slug: "{rfi_slug}"
-followup_id: "{followup_id}"
-slug: "{slug}"
-status: "researching"
-created: "{now}"
-updated: "{now}"
-priority: "{priority}"
-domain_profile: "{domain_profile}"
-query_plan: "{_relative(query_plan, root)}"
-addendum: "{_relative(addendum, root)}"
-claim_matrix: "{_relative(claim_matrix, root)}"
----
+        must_lines = "\n".join(f"- {x}" for x in must_address) or "- (조사 중 구체화)"
+        body = textwrap.dedent(f"""---
+    rfi: "{rfi_id}"
+    rfi_slug: "{rfi_slug}"
+    followup_id: "{followup_id}"
+    slug: "{slug}"
+    status: "researching"
+    created: "{now}"
+    updated: "{now}"
+    priority: "{priority}"
+    domain_profile: "{domain_profile}"
+    query_plan: "{_relative(query_plan, root)}"
+    addendum: "{_relative(addendum, root)}"
+    claim_matrix: "{_relative(claim_matrix, root)}"
+    ---
 
-# RFI-{rfi_id} Follow-up {followup_id} — {topic}
+    # RFI-{rfi_id} Follow-up {followup_id} — {topic}
 
-## Trigger
+    ## Trigger
 
-{question or topic}
+    {question or topic}
 
-## Conditional Focus
+    ## Conditional Focus
 
-이 follow-up 은 RFI-{rfi_id} 본문을 재작성하기 전에 기존 결론의 약한
-부분만 추가 조사한다. 새 RFI 번호를 만들지 않고 addendum 으로 근거를
-축적한 뒤, 충분할 때 원 리뷰에 병합한다.
+    이 follow-up 은 RFI-{rfi_id} 본문을 재작성하기 전에 기존 결론의 약한
+    부분만 추가 조사한다. 새 RFI 번호를 만들지 않고 addendum 으로 근거를
+    축적한 뒤, 충분할 때 원 리뷰에 병합한다.
 
-## Must Address
+    ## Must Address
 
-{must_lines}
+    {must_lines}
 
-## Expected Deliverables
+    ## Expected Deliverables
 
-- [ ] `{_relative(query_plan, root)}`
-- [ ] `{_relative(addendum, root)}`
-- [ ] `{_relative(claim_matrix, root)}`
-- [ ] 필요 시 follow-up candidates/triage/summaries
-- [ ] 원 리뷰 병합 여부 결정
+    - [ ] `{_relative(query_plan, root)}`
+    - [ ] `{_relative(addendum, root)}`
+    - [ ] `{_relative(claim_matrix, root)}`
+    - [ ] 필요 시 follow-up candidates/triage/summaries
+    - [ ] 원 리뷰 병합 여부 결정
 
-## Acceptance Gate
+    ## Acceptance Gate
 
-- 새 후보는 기존 RFI claim 과의 관계가 명확해야 한다.
-- abstract-only 근거만으로 high-confidence claim 을 추가하지 않는다.
-- addendum 작성 후 `python -m gui_lit.doctor .` 를 통과한다.
+    - 새 후보는 기존 RFI claim 과의 관계가 명확해야 한다.
+    - abstract-only 근거만으로 high-confidence claim 을 추가하지 않는다.
+    - addendum 작성 후 `python -m gui_lit.doctor .` 를 통과한다.
 
-## Progress
+    ## Progress
 
-- {now}: follow-up opened.
-"""
-    followup_file.write_text(body, encoding="utf-8")
+    - {now}: follow-up opened.
+    """).replace("\n    ", "\n")
+        followup_file.write_text(body, encoding="utf-8")
     ipc.append_journal(
         root,
         {
